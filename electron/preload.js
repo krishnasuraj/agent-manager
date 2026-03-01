@@ -22,16 +22,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return () => ipcRenderer.removeListener('task:deleted', handler)
   },
 
-  // Terminal
-  startTerminal: (taskId) => ipcRenderer.invoke('terminal:start', taskId),
-  onTerminalData: (taskId, cb) => {
-    const channel = `terminal:data:${taskId}`
-    const handler = (_, data) => cb(data)
+  // Session
+  sendMessage: (taskId, text) =>
+    ipcRenderer.invoke('session:send-message', { taskId, text }),
+  abortSession: (taskId) =>
+    ipcRenderer.send('session:abort', taskId),
+  onSessionEvent: (taskId, cb) => {
+    const channel = `session:event:${taskId}`
+    const handler = (_, event) => cb(event)
     ipcRenderer.on(channel, handler)
     return () => ipcRenderer.removeListener(channel, handler)
   },
-  sendTerminalInput: (taskId, data) =>
-    ipcRenderer.send('terminal:input', taskId, data),
-  sendTerminalResize: (taskId, cols, rows) =>
-    ipcRenderer.send('terminal:resize', { taskId, cols, rows }),
 })

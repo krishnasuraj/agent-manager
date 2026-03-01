@@ -1,11 +1,11 @@
 import { ipcMain } from 'electron'
 
-export function registerIpcHandlers(taskStore, terminalManager, getWindow) {
+export function registerIpcHandlers(taskStore, claudeManager, getWindow) {
   ipcMain.handle('tasks:getAll', () => {
     return taskStore.getAll()
   })
 
-  ipcMain.handle('tasks:create', (_, { title, baseBranch }) => {
+  ipcMain.handle('tasks:create', (_, { title, baseBranch, prompt }) => {
     if (!title) throw new Error('Title is required')
     const task = taskStore.create({ title, baseBranch })
 
@@ -14,17 +14,21 @@ export function registerIpcHandlers(taskStore, terminalManager, getWindow) {
       win.webContents.send('task:created', task)
     }
 
-    // Auto-start shell terminal in the worktree (don't let spawn failure block task creation)
+    // Auto-start Claude session in the worktree
     try {
-      terminalManager.startTerminal(task.id)
+      claudeManager.startSession(task.id)
+      // If an initial prompt was provided, send it
+      if (prompt && prompt.trim()) {
+        claudeManager.sendMessage(task.id, prompt.trim())
+      }
     } catch (err) {
-      console.error('[ipc] terminal auto-start failed:', err.message)
+      console.error('[ipc] session auto-start failed:', err.message)
     }
     return task
   })
 
   ipcMain.handle('tasks:delete', (_, taskId) => {
-    terminalManager.stopTerminal(taskId)
+    claudeManager.stopSession(taskId)
     const deleted = taskStore.delete(taskId)
     if (deleted) {
       const win = getWindow()
@@ -35,18 +39,13 @@ export function registerIpcHandlers(taskStore, terminalManager, getWindow) {
     return deleted
   })
 
-  ipcMain.handle('terminal:start', (_, taskId) => {
-    terminalManager.startTerminal(taskId)
+  ipcMain.handle('session:send-message', (_, { taskId, text }) => {
+    claudeManager.sendMessage(taskId, text)
     return true
   })
 
-  // Fire-and-forget: keystrokes from renderer to PTY
-  ipcMain.on('terminal:input', (_, taskId, data) => {
-    terminalManager.writeToTerminal(taskId, data)
-  })
-
-  // Fire-and-forget: terminal resize
-  ipcMain.on('terminal:resize', (_, { taskId, cols, rows }) => {
-    terminalManager.resizeTerminal(taskId, cols, rows)
+  // Fire-and-forget: abort current Claude response
+  ipcMain.on('session:abort', (_, taskId) => {
+    claudeManager.abort(taskId)
   })
 }

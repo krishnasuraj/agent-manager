@@ -26,6 +26,9 @@ export function createTaskStore() {
         branch: `feat/${slug}`,
         baseBranch: baseBranch || 'main',
         worktreePath: null,
+        messages: [],
+        tokenUsage: { input: 0, output: 0 },
+        error: null,
         createdAt: Date.now(),
         updatedAt: Date.now(),
       }
@@ -55,6 +58,15 @@ export function createTaskStore() {
       if (!task) return false
       tasks.delete(id)
       return true
+    },
+
+    appendMessage(id, message) {
+      const task = tasks.get(id)
+      if (!task) return null
+      task.messages = [...task.messages, message]
+      task.updatedAt = Date.now()
+      notify(task)
+      return task
     },
 
     onChange(fn) {

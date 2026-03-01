@@ -13,10 +13,7 @@ export default defineConfig({
       lib: {
         entry: resolve(__dirname, 'electron/main.js'),
       },
-      rollupOptions: {
-        external: ['node-pty'],
-      },
-    },
+},
   },
   preload: {
     build: {
@@ -28,6 +25,11 @@ export default defineConfig({
   renderer: {
     root: '.',
     plugins: [react(), tailwindcss()],
+    server: {
+      watch: {
+        ignored: ['**/.worktrees/**'],
+      },
+    },
     build: {
       rollupOptions: {
         input: resolve(__dirname, 'index.html'),

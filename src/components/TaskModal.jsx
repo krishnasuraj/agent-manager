@@ -5,11 +5,12 @@ const baseBranches = ['main', 'develop']
 export default function TaskModal({ onClose, onCreateTask }) {
   const [title, setTitle] = useState('')
   const [baseBranch, setBaseBranch] = useState('main')
+  const [prompt, setPrompt] = useState('')
 
   async function handleSubmit(e) {
     e.preventDefault()
     if (!title.trim()) return
-    await onCreateTask({ title: title.trim(), baseBranch })
+    await onCreateTask({ title: title.trim(), baseBranch, prompt: prompt.trim() })
     onClose()
   }
 
@@ -51,6 +52,20 @@ export default function TaskModal({ onClose, onCreateTask }) {
                 <option key={b} value={b}>{b}</option>
               ))}
             </select>
+          </div>
+
+          <div>
+            <label className="block text-xs font-medium text-text-secondary mb-1.5">
+              Prompt
+              <span className="ml-1.5 font-normal text-text-muted">- initial message to send to Claude</span>
+            </label>
+            <textarea
+              value={prompt}
+              onChange={(e) => setPrompt(e.target.value)}
+              placeholder="Describe the task for Claude..."
+              rows={3}
+              className="w-full rounded-lg border border-border bg-surface-0 px-3 py-2 text-sm text-text-primary placeholder-text-muted outline-none focus:border-border-bright transition-colors resize-none font-mono"
+            />
           </div>
 
           <div className="flex justify-end gap-2 pt-2">

@@ -25,8 +25,8 @@ export function useTasks() {
     }
   }, [])
 
-  const createTask = useCallback(({ title, baseBranch }) => {
-    return window.electronAPI.createTask({ title, baseBranch })
+  const createTask = useCallback(({ title, baseBranch, prompt }) => {
+    return window.electronAPI.createTask({ title, baseBranch, prompt })
   }, [])
 
   const deleteTask = useCallback((taskId) => {

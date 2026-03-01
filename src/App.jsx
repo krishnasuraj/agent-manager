@@ -3,7 +3,7 @@ import TopBar from './components/TopBar'
 import BoardView from './components/BoardView'
 import QueueView from './components/QueueView'
 import TaskModal from './components/TaskModal'
-import TerminalPanel from './components/TerminalPanel'
+import SessionPanel from './components/SessionPanel'
 import ResizableSplit from './components/ResizableSplit'
 import { useTasks } from './hooks/useTasks'
 
@@ -27,11 +27,11 @@ export default function App() {
     </div>
   )
 
-  const terminalContent = selectedTask ? (
-    <TerminalPanel task={selectedTask} onClose={() => setSelectedTaskId(null)} />
+  const sessionContent = selectedTask ? (
+    <SessionPanel task={selectedTask} onClose={() => setSelectedTaskId(null)} />
   ) : (
     <div className="flex flex-1 items-center justify-center bg-surface-0">
-      <p className="text-xs text-text-muted font-mono">select a task to open its terminal</p>
+      <p className="text-xs text-text-muted font-mono">select a task to open its session</p>
     </div>
   )
 
@@ -46,7 +46,7 @@ export default function App() {
 
       <ResizableSplit
         left={mainContent}
-        right={terminalContent}
+        right={sessionContent}
         defaultRatio={0.55}
         minLeftPx={380}
         minRightPx={300}
