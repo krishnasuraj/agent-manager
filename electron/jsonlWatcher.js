@@ -231,7 +231,6 @@ export function createJsonlWatcher(getWindow) {
       lastWriteTime: Date.now(),
       staleTimer: null,
       locked: false,
-      unlockTimer: null,
       knownFiles: existingFiles || new Set(),
     }
 
@@ -284,25 +283,10 @@ export function createJsonlWatcher(getWindow) {
       clearTimeout(state.staleTimer)
       state.staleTimer = setTimeout(() => {
         const derived = deriveState(state.events, state.lastWriteTime)
-        sendToRenderer('jsonl:state', sessionId, derived)
-
-        // Fallback: if file hasn't changed in 30s and state is idle/done,
-        // the session likely ended without a result event (e.g., Ctrl+C).
-        // Schedule a delayed unlock check.
-        if (!state.unlockTimer) {
-          state.unlockTimer = setTimeout(() => {
-            state.unlockTimer = null
-            if (!state.locked) return
-            const staleSec = (Date.now() - state.lastWriteTime) / 1000
-            if (staleSec > 25) {
-              console.log(`[jsonlWatcher:${sessionId}] session stale for ${staleSec.toFixed(0)}s — unlocking`)
-              sendToRenderer('jsonl:state', sessionId, { state: 'done', summary: 'Session ended' })
-              sendToRenderer('jsonl:session-ended', sessionId)
-              state.locked = false
-              state.events = []
-              state.knownFiles = snapshotFiles()
-            }
-          }, 25000)
+        if (derived.state === 'idle') {
+          setTimeout(() => sendToRenderer('jsonl:state', sessionId, derived), 1000)
+        } else {
+          sendToRenderer('jsonl:state', sessionId, derived)
         }
       }, 5000)
     })
@@ -381,8 +365,6 @@ export function createJsonlWatcher(getWindow) {
             state.locked = false
             state.events = []
             clearTimeout(state.staleTimer)
-            clearTimeout(state.unlockTimer)
-            state.unlockTimer = null
             state.knownFiles = snapshotFiles()
             return
           }
@@ -421,8 +403,6 @@ export function createJsonlWatcher(getWindow) {
 
     // Reset the stale timer so it doesn't flip back to idle
     clearTimeout(state.staleTimer)
-    clearTimeout(state.unlockTimer)
-    state.unlockTimer = null
     state.staleTimer = setTimeout(() => {
       const derived = deriveState(state.events, state.lastWriteTime)
       sendToRenderer('jsonl:state', sessionId, derived)
@@ -475,8 +455,6 @@ export function createJsonlWatcher(getWindow) {
     state.locked = false
     state.events = []
     clearTimeout(state.staleTimer)
-    clearTimeout(state.unlockTimer)
-    state.unlockTimer = null
     state.knownFiles = snapshotFiles()
   }
 
@@ -484,7 +462,6 @@ export function createJsonlWatcher(getWindow) {
     const entry = watchers.get(sessionId)
     if (!entry) return
     clearTimeout(entry.state.staleTimer)
-    clearTimeout(entry.state.unlockTimer)
     entry.watcher.close()
     watchers.delete(sessionId)
   }
@@ -492,7 +469,6 @@ export function createJsonlWatcher(getWindow) {
   function stopAll() {
     for (const [, entry] of watchers) {
       clearTimeout(entry.state.staleTimer)
-      clearTimeout(entry.state.unlockTimer)
       entry.watcher.close()
     }
     watchers.clear()
