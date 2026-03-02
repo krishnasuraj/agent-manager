@@ -1,12 +1,9 @@
-import { app, BrowserWindow } from 'electron'
+import { app, BrowserWindow, ipcMain, dialog } from 'electron'
 import path from 'path'
-import { createTaskStore } from './taskStore.js'
-import { createClaudeManager } from './claudeManager.js'
-import { registerIpcHandlers } from './ipc.js'
-import { seedTasks } from './seed.js'
+import { createPtyManager } from './ptyManager.js'
+import { createJsonlWatcher } from './jsonlWatcher.js'
 
-// Scrub Claude env vars from the main process so child processes
-// don't inherit nesting detection vars (allows running from inside Claude Code)
+// Scrub Claude env vars so child processes don't inherit nesting detection
 for (const key of Object.keys(process.env)) {
   if (key.toUpperCase().includes('CLAUDE')) {
     delete process.env[key]
@@ -15,13 +12,12 @@ for (const key of Object.keys(process.env)) {
 
 let mainWindow = null
 
-const taskStore = createTaskStore()
-
 function getWindow() {
   return mainWindow
 }
 
-const claudeManager = createClaudeManager(taskStore, getWindow)
+const ptyManager = createPtyManager(getWindow)
+const jsonlWatcher = createJsonlWatcher(getWindow)
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -39,12 +35,56 @@ function createWindow() {
     },
   })
 
-  registerIpcHandlers(taskStore, claudeManager, getWindow)
+  // IPC: PTY input from renderer
+  ipcMain.on('pty:write', (_, sessionId, data) => {
+    ptyManager.write(sessionId, data)
+  })
 
-  taskStore.onChange((task) => {
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('task:updated', task)
+  ipcMain.on('pty:resize', (_, sessionId, cols, rows) => {
+    ptyManager.resize(sessionId, cols, rows)
+  })
+
+  // IPC: List recent Claude sessions for a given directory
+  ipcMain.handle('sessions:list-recent', (_, cwd) => {
+    return jsonlWatcher.listRecentSessions(cwd || process.cwd())
+  })
+
+  // IPC: Native folder picker
+  ipcMain.handle('dialog:pick-folder', async () => {
+    const result = await dialog.showOpenDialog(mainWindow, {
+      properties: ['openDirectory'],
+    })
+    if (result.canceled || result.filePaths.length === 0) return null
+    return result.filePaths[0]
+  })
+
+  // IPC: Spawn a new session (fresh or resumed)
+  ipcMain.handle('session:spawn', (_, sessionId, opts) => {
+    const cwd = opts.cwd || process.cwd()
+    const claudeSessionId = opts.claudeSessionId || null
+
+    // Both new and resumed sessions use snapshot-based file detection.
+    // Claude --resume creates a NEW .jsonl file (different UUID from the original),
+    // so we can't just lock to <sessionId>.jsonl — we must detect the new file.
+    const existingFiles = jsonlWatcher.snapshotFiles(cwd)
+
+    if (claudeSessionId) {
+      ptyManager.spawn(sessionId, { cwd, claudeSessionId })
+    } else {
+      ptyManager.spawn(sessionId, { cwd, initialPrompt: opts.initialPrompt })
     }
+
+    jsonlWatcher.startWatching(sessionId, cwd, { existingFiles })
+
+    // Wire PTY signals → JSONL watcher for instant state transitions
+    ptyManager.onThinking(sessionId, (sid) => {
+      jsonlWatcher.notifyThinking(sid)
+    })
+    ptyManager.onPermissionPrompt(sessionId, (sid) => {
+      jsonlWatcher.notifyPermissionPrompt(sid)
+    })
+
+    return { sessionId, cwd }
   })
 
   if (process.env.ELECTRON_RENDERER_URL) {
@@ -61,15 +101,6 @@ function createWindow() {
 app.whenReady().then(() => {
   createWindow()
 
-  // Auto-seed tasks if --seed flag is present
-  const seedFlag = process.argv.includes('--seed')
-  if (seedFlag) {
-    // Wait for renderer to be ready before seeding
-    mainWindow.webContents.on('did-finish-load', () => {
-      seedTasks(taskStore, claudeManager, getWindow)
-    })
-  }
-
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
       createWindow()
@@ -78,7 +109,8 @@ app.whenReady().then(() => {
 })
 
 app.on('before-quit', () => {
-  claudeManager.stopAll()
+  ptyManager.killAll()
+  jsonlWatcher.stopAll()
 })
 
 app.on('window-all-closed', () => {

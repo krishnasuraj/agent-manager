@@ -4,6 +4,7 @@ export function useSession(taskId) {
   const [messages, setMessages] = useState([])
   const [isStreaming, setIsStreaming] = useState(false)
   const [pendingQuestion, setPendingQuestion] = useState(null) // { questions, toolUseId }
+  const [toolResultMap, setToolResultMap] = useState({}) // keyed by toolUseId
 
   useEffect(() => {
     if (!taskId) return
@@ -11,6 +12,7 @@ export function useSession(taskId) {
     setMessages([])
     setIsStreaming(false)
     setPendingQuestion(null)
+    setToolResultMap({})
 
     const removeListener = window.electronAPI.onSessionEvent(taskId, (event) => {
       switch (event.type) {
@@ -21,10 +23,16 @@ export function useSession(taskId) {
         }
 
         case 'tool_result': {
-          setMessages((prev) => [
-            ...prev,
-            { role: 'tool_result', toolResults: event.results, timestamp: Date.now() },
-          ])
+          // Store results in map keyed by toolUseId instead of appending to messages
+          if (event.results) {
+            setToolResultMap((prev) => {
+              const next = { ...prev }
+              for (const tr of event.results) {
+                next[tr.toolUseId] = { content: tr.content, isError: tr.isError }
+              }
+              return next
+            })
+          }
           setIsStreaming(true)
           break
         }
@@ -78,6 +86,7 @@ export function useSession(taskId) {
     messages,
     isStreaming,
     pendingQuestion,
+    toolResultMap,
     sendMessage,
     abort,
   }

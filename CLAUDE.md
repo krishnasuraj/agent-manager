@@ -1,218 +1,203 @@
-# Stream-JSON Claude Code Orchestrator
+# Claude Code Orchestrator
 
 ## What This Is
 
-An Electron desktop app for monitoring and managing multiple Claude Code sessions across git worktrees. Uses `claude -p --output-format stream-json --input-format stream-json` for structured, deterministic state detection. The UI is a chat-like session panel with streaming text and tool call cards, alongside a kanban board that tracks agent status.
+An Electron desktop app for monitoring and managing multiple Claude Code sessions across git worktrees. The architecture is: **real terminal (xterm.js + node-pty) for UX** + **JSONL session file watcher for state detection** + **a sidebar that surfaces what needs attention**.
+
+Currently at **Stage 1** of the staged build plan (see `project_spec.md`): single-session terminal + JSONL proof of concept. Multi-session, worktree management, and orchestration are planned for later stages.
 
 ## Tech Stack
 
 - **Electron** — desktop shell (main + renderer processes)
 - **React 19** (Vite via electron-vite) — renderer UI
 - **Tailwind CSS v4** — styling (no `tailwind.config.js` — uses `@theme` in CSS)
-- **child_process.spawn** — spawns `claude -p` per task (no native modules)
+- **node-pty** — real pseudoterminal for Claude Code sessions (native C++ addon)
+- **xterm.js** — terminal rendering in the renderer process
+- **chokidar** — file watching for JSONL session files
 - **IPC** (contextBridge) — communication between main and renderer
 - In-memory state (main process, no database)
 - No component library — custom components only
 
-## Architecture
+## Architecture (Stage 1)
 
 ```
-┌──────────────────────────────────────────────────────┐
-│  Electron Main Process                               │
-│                                                      │
-│  taskStore.js ─── claudeManager.js ─── child_process │
-│       │                │                   │         │
-│       │          NDJSON parsing             │ spawn   │
-│       │          (structured events)       │ per task│
-│       │                │                   │         │
-│       └──── IPC (contextBridge) ───────────┘         │
-│                      │                               │
-├──────────────────────┤───────────────────────────────┤
-│  Preload Script      │                               │
-│  electronAPI bridge  │                               │
-├──────────────────────┤───────────────────────────────┤
-│  Renderer Process (React)                            │
-│                                                      │
-│  App.jsx ─── ResizableSplit                          │
-│     │          ├── BoardView / QueueView (left)      │
-│     │          └── SessionPanel (right, chat UI)     │
-│     └── TaskModal                                    │
-│                                                      │
-└──────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────┐
+│  Electron Main Process                                  │
+│                                                         │
+│  ┌─────────────┐  ┌──────────────┐                      │
+│  │ PTY Manager │  │ JSONL Watcher│                      │
+│  │ (node-pty)  │  │ (chokidar)   │                      │
+│  └──────┬──────┘  └──────┬───────┘                      │
+│         │                │                              │
+│         │  IPC Bridge    │  IPC Bridge                  │
+├─────────┼────────────────┼──────────────────────────────┤
+│  Preload Script (contextBridge)                         │
+├─────────┼────────────────┼──────────────────────────────┤
+│  Electron Renderer Process (React)                      │
+│                                                         │
+│  ┌────────────────┐  ┌──────────────────────────────┐   │
+│  │ StateLog       │  │ TerminalPanel                │   │
+│  │ (sidebar 30%)  │  │ (xterm.js 70%)               │   │
+│  └────────────────┘  └──────────────────────────────┘   │
+└─────────────────────────────────────────────────────────┘
 ```
 
-- Main process owns all task state (in-memory)
-- Renderer is a thin client that receives state via IPC
-- Each task = one `claude -p` process in an isolated git worktree
-- User types prompts in a text input, Claude responds with streaming text + tool call cards
-- Structured JSON events flow from `claude -p` stdout → claudeManager → IPC → renderer
-- Status is deterministic from JSON events (no heuristic pattern matching)
+- PTY Manager spawns Claude Code in a real pseudoterminal (interactive mode, full UI)
+- JSONL Watcher tails Claude's session JSONL file to derive state (working, idle, needs-input, done, error)
+- Terminal Panel renders the PTY output via xterm.js — user interacts with Claude directly
+- State Log sidebar shows derived state badge + chronological event log
 
-## Interaction Model
+## How It Works
 
-The session panel is a chat-like UI. The user sends prompts via a text input, and Claude's responses stream in as text blocks and collapsible tool call cards. This replaces the previous interactive terminal approach.
+1. User starts a session (new or resume) from the spawn screen
+2. Main process snapshots existing `.jsonl` files in the project dir
+3. PTY Manager spawns a login shell, then types `claude` (or `claude --resume <id>`) into it
+4. JSONL Watcher detects the NEW `.jsonl` file (not in the snapshot) and locks onto it permanently
+5. As Claude works, the watcher tails new lines, parses events, derives state, and sends updates to renderer
+6. Terminal Panel shows the full interactive Claude Code UI — user types directly
 
-1. **Isolation** — each task gets its own git worktree
-2. **Monitoring** — kanban board tracks agent state from structured JSON events
-3. **Multiplexing** — manage multiple concurrent Claude sessions
+## State Detection: JSONL Session Files
 
-## Deterministic State Detection
+Claude Code writes a JSONL file per session at:
+```
+~/.claude/projects/<encoded-path>/<session-uuid>.jsonl
+```
 
-Status is derived from stream-json events — no heuristic pattern matching:
+The encoded path replaces both `/` and `_` with `-`:
+```
+/Users/me/my_project → -Users-me-my-project
+```
 
-| Event | Status |
-|-------|--------|
-| `message_start` (assistant) | `in-progress` |
-| `content_block_start` | `in-progress` |
-| `message_stop` | `idle` |
-| process exit(0) | `completed` |
-| process exit(non-zero) / error | `completed` + error |
+**Note:** Files are directly in the project dir, NOT in a `sessions/` subdirectory.
 
-## Core Concepts
+### State Derivation Logic
 
-### Task
+State is derived from the **last JSONL event** + **time since last file write**:
 
-A task is a named Claude session in an isolated git worktree. Every task has:
+| Signal | Derived State |
+|--------|---------------|
+| Last event has `tool_use` blocks, file still changing | **Working** — actively running tools |
+| Last event has `tool_use` blocks, file quiet for 5s+ | **Needs Input** — likely waiting for permission approval |
+| Last event is assistant text, file quiet for 5s+ | **Idle** — finished response, waiting for user |
+| Last event is `tool_result` | **Working** — processing tool result |
+| Last event is user prompt | **Working** — processing prompt |
+| Process exit code 0 | **Done** |
+| Process exit non-zero | **Error** |
 
-- `id` — unique identifier
-- `title` — short human-readable name
-- `status` — one of four statuses (derived from JSON events)
-- `branch` — the git branch / worktree name (`feat/<slug>`)
-- `baseBranch` — the branch it was forked from
-- `worktreePath` — absolute path to the worktree directory
-- `messages` — array of `{role, content, toolCalls?, timestamp}`
-- `tokenUsage` — `{input, output}` token counts
-- `error` — error string if session failed
-- `createdAt` / `updatedAt` — timestamps
+The 5-second stale timer has known limitations: slow Bash commands (npm install, npm test) can take longer than 5s, causing false "needs-input" detection. Per-tool timeouts or PTY output pattern matching could improve this in the future.
 
-### Statuses
+### Session File Tracking
 
-Four columns in the kanban, four possible states:
+Two modes for tying a PTY session to its JSONL file:
 
-1. **Idle** — session started but waiting for user prompt, or Claude finished a response
-2. **In Progress** — Claude is actively working (streaming text or executing tools)
-3. **Input Required** — reserved for future use (e.g., Claude asking clarifying questions)
-4. **Completed** — Claude session ended (process exited)
+1. **New session:** Snapshot existing `.jsonl` files before spawning Claude. After spawn, watch for a NEW file that wasn't in the snapshot. Lock onto it permanently.
+2. **Resumed session:** Pass the Claude session UUID directly. Lock onto `<uuid>.jsonl`, skip to end of file, tail new content. Read last 10 events for initial status.
 
-Status transitions are automatic (driven by JSON events), not manual.
+## IPC Protocol (Stage 1)
 
-## Two Views + Session Panel
+**Main → Renderer (events):**
+| Channel | Payload |
+|---------|---------|
+| `pty:data` | `(sessionId, data)` — raw PTY output bytes |
+| `pty:exit` | `(sessionId, { exitCode, signal })` |
+| `jsonl:state` | `(sessionId, { state, summary })` — derived state |
+| `jsonl:event` | `(sessionId, { timestamp, icon, label, detail })` — log entry |
 
-### 1. Board View (Kanban)
-Four columns, one per status. Cards show title, branch, status dot, time-ago. Clicking any card opens its session panel.
+**Renderer → Main (fire-and-forget):**
+| Channel | Payload |
+|---------|---------|
+| `pty:write` | `(sessionId, data)` — keyboard input |
+| `pty:resize` | `(sessionId, cols, rows)` |
 
-### 2. Issues View (List)
-Filtered to `input-required` only. FIFO ordering. Clicking opens session panel.
+**Renderer → Main (invoke):**
+| Channel | Payload |
+|---------|---------|
+| `session:spawn` | `(sessionId, { cwd?, claudeSessionId? })` |
 
-### 3. Session Panel
-Right side of a resizable split. Chat-like UI with:
-- Header: status dot, title, branch, abort button (when streaming), close button
-- Message list: user messages, assistant text, tool call cards, streaming text with cursor
-- Input bar: textarea + send button, disabled while streaming
-
-## Layout
-
-Resizable split: kanban/issues on left, session panel on right. Draggable divider. Default 55/45 split. Min widths enforced (380px left, 300px right).
-
-## File Structure
+## File Structure (Current)
 
 ```
 electron/
-  main.js               — Electron entry, window creation, module init, env scrubbing
+  main.js               — Electron entry, window creation, IPC, env scrubbing
   preload.js            — contextBridge exposing electronAPI
-  taskStore.js          — In-memory task state with change listeners
-  claudeManager.js      — Spawns claude -p, parses NDJSON, maps events→status
-  worktree.js           — Git worktree create/remove per task
-  ipc.js                — IPC handler registration
-  seed.js               — Auto-creates test tasks when --seed flag is passed
+  ptyManager.js         — Spawns Claude in real PTY via node-pty
+  jsonlWatcher.js       — Watches JSONL session files, derives state
+  claudeManager.js      — (v5 leftover) Spawns claude -p, parses NDJSON
+  taskStore.js          — (v5 leftover) In-memory task state
+  ipc.js                — (v5 leftover) IPC handler registration
+  worktree.js           — (v5 leftover) Git worktree create/remove
+  seed.js               — (v5 leftover) Auto-creates test tasks
 src/
   components/
-    TopBar.jsx          — App header, view toggle, queue badge, new task button
-    BoardView.jsx       — 4-column kanban
-    QueueView.jsx       — Input-required filtered list
-    TaskCard.jsx        — Clickable card (no action buttons)
-    TaskModal.jsx       — Create task: title + base branch + initial prompt
-    SessionPanel.jsx    — Chat UI: message list + input bar
-    ToolCallCard.jsx    — Collapsible card for tool calls
+    TerminalPanel.jsx   — xterm.js terminal with FitAddon + WebLinksAddon
+    StateLog.jsx        — Sidebar: state badge + scrolling event log
     ResizableSplit.jsx  — Draggable split layout
+    SessionPanel.jsx    — (v5 leftover) Chat UI with markdown rendering
+    ToolCallCard.jsx    — (v5 leftover) Collapsible tool call card
+    BoardView.jsx       — (v5 leftover) 4-column kanban
+    QueueView.jsx       — (v5 leftover) Input-required list
+    TaskCard.jsx        — (v5 leftover) Kanban card
+    TaskModal.jsx       — (v5 leftover) Create task modal
+    TopBar.jsx          — (v5 leftover) App header
   hooks/
-    useTasks.js         — IPC-driven task state
-    useSession.js       — Subscribes to session events, manages streaming state
-  App.jsx
+    useSession.js       — (v5 leftover) Session event subscription
+    useTasks.js         — (v5 leftover) IPC-driven task state
+    useTypewriter.js    — (v5 leftover) rAF typewriter animation
+  App.jsx               — Spawn screen → split layout (sidebar + terminal)
   main.jsx
-  index.css             — tailwind imports + theme tokens
+  index.css             — Tailwind imports + theme tokens + xterm.css
 ```
+
+Files marked "(v5 leftover)" are from the previous stream-json architecture and not currently used by Stage 1. They'll be removed or adapted as the project progresses.
 
 ## Build System
 
 - **electron-vite 5** — Vite-based build for Electron (main, preload, renderer)
 - Config file: `electron.vite.config.js` (NOTE: dot-separated, not hyphen)
 - **Tailwind CSS v4** via `@tailwindcss/vite` plugin
+- **node-pty** requires `electron-rebuild` (native C++ addon)
 - Fonts: **Inter** (sans) + **JetBrains Mono** (mono) loaded via Google Fonts in `index.html`
-- No native modules — no `electron-rebuild` needed
 - Build output: `out/main/`, `out/preload/`, `out/renderer/`
 
 ### Running the App
 
 ```bash
 npm install
-npm run dev       # electron-vite dev — opens Electron window with hot reload
-npm run dev:seed  # same as dev but auto-creates 3 test tasks on startup
-npm run build     # electron-vite build — production build to out/
+npm run rebuild       # electron-rebuild for node-pty (with CXXFLAGS workaround)
+npm run dev           # electron-vite dev — opens Electron window with hot reload
+npm run build         # electron-vite build — production build to out/
+```
+
+### node-pty Rebuild
+
+node-pty is a native C++ addon. On macOS with broken CLT include paths, the rebuild script uses explicit CXXFLAGS:
+
+```bash
+CXXFLAGS="-I$(xcrun --show-sdk-path)/usr/include/c++/v1 -isysroot $(xcrun --show-sdk-path)" npx electron-rebuild -f -w node-pty
 ```
 
 ### Custom Theme Tokens (defined in `src/index.css` via `@theme`)
 
 Surfaces: `surface-0` (darkest) through `surface-3`. Borders: `border`, `border-bright`. Text: `text-primary`, `text-secondary`, `text-muted`. Status colors: `status-idle` (gray), `status-running` (blue), `status-guidance` (amber), `status-merged` (green). Use these token names in Tailwind classes (e.g. `bg-surface-2`, `text-status-running`).
 
-## IPC Protocol
-
-**Main → Renderer (events):**
-| Channel | When |
-|---------|------|
-| `task:created` | New task added |
-| `task:updated` | Any task field changes |
-| `task:deleted` | Task removed |
-| `session:event:<taskId>` | Parsed JSON event from claude -p for a specific task |
-
-**Renderer → Main (invoke):**
-| Channel | Args |
-|---------|------|
-| `tasks:getAll` | — |
-| `tasks:create` | `{ title, baseBranch, prompt }` |
-| `tasks:delete` | `taskId` |
-| `session:send-message` | `{ taskId, text }` |
-
-**Renderer → Main (fire-and-forget):**
-| Channel | Args |
-|---------|------|
-| `session:abort` | `taskId` |
-
-## Permission Model
-
-Uses `--dangerously-skip-permissions` since tasks run in isolated worktrees. Can later add per-task `--allowedTools` configuration.
-
 ## Design Direction
 
 Dark mode only. Developer tool aesthetic — think Linear meets a terminal. Precise, not playful.
 
 - Dark background (`surface-0`: #0a0a0f), muted surfaces, sharp accent colors for status
-- Monospace font for branch names, code references, timestamps, message content
-- Sans-serif for titles and descriptions
-- In-progress cards get animated border glow
-- Session panel matches app background seamlessly
-- Generous spacing — the board should breathe
+- Monospace font for branch names, code references, timestamps, terminal content
+- Sans-serif for titles and labels
+- Generous spacing — the UI should breathe
 
-## What We Are NOT Building Yet
+## Staged Build Plan
 
-- Git worktree cleanup on task delete
-- Persistent storage / database
-- Drag and drop on the kanban
-- Multi-repo support
-- Electron packaging / distribution
-- Dynamic branch list in task creation modal
-- Per-task `--allowedTools` configuration
-- Manual status override
+See `project_spec.md` for the full plan. Summary:
+
+1. **Stage 1 (current):** Terminal + JSONL proof of concept. Single session.
+2. **Stage 2:** Multi-session support. Tab switching, PTY buffering.
+3. **Stage 3:** Worktree integration + session spawning UI.
+4. **Stage 4:** Orchestration layer. Attention zones, notifications, cross-session awareness.
+5. **Stage 5:** Polish. Search, cost tracking, session replay, hooks integration, MCP guidance server.
 
 ## Migration History
 
@@ -226,57 +211,61 @@ Node.js + Express server with WebSocket. Used `@anthropic-ai/claude-agent-sdk`.
 Electron app with `claude -p --output-format stream-json`. Structured event parsing. Read-only terminals.
 
 ### v4: Terminal-First
-Full interactive terminals via node-pty + xterm.js. User runs `claude` directly. Heuristic state detection via ANSI-stripped pattern matching. Unreliable — terminal output fragmentation and ANSI artifacts caused frequent misclassification.
+Full interactive terminals via node-pty + xterm.js. Heuristic state detection via ANSI-stripped pattern matching. Unreliable — terminal output fragmentation and ANSI artifacts caused frequent misclassification.
 
-### v5: Stream-JSON (current)
-Back to structured JSON events via `claude -p --output-format stream-json --input-format stream-json`. Chat-like session UI replaces interactive terminal. Deterministic state detection from JSON events. No native modules (node-pty removed). Multi-turn conversations via stream-json stdin.
+### v5: Stream-JSON
+Back to structured JSON events via `claude -p --output-format stream-json --input-format stream-json`. Chat-like session UI. Deterministic state detection from JSON events. No native modules. Multi-turn conversations via stream-json stdin.
+
+### v6: Terminal + JSONL Watching (current)
+Best of both worlds: real interactive terminal (node-pty + xterm.js) for UX, JSONL session file watching for reliable state detection. No heuristic pattern matching. User interacts with Claude's native UI directly while the app tracks state from structured JSONL data written to disk.
 
 **Key learnings from previous versions:**
 - `electron-vite` 5.x supports Vite 7 (3.x only supports up to Vite 6)
 - Config file must be named `electron.vite.config.js` (dot-separated)
 - Preload scripts are built as `.mjs` by default — reference `preload.mjs` in BrowserWindow config
-- `pointer-events: none` on panels during resize drag is essential to prevent canvas from stealing mouse events
+- `pointer-events: none` on panels during resize drag prevents canvas from stealing mouse events
 - Heuristic ANSI-stripped pattern matching is fundamentally unreliable for state detection
-- `claude -p` with stream-json gives deterministic, structured events
+- `claude -p` with stream-json gives deterministic events but loses the interactive terminal experience
+- JSONL session files give reliable state without sacrificing terminal interactivity
 
 ## Gotchas & Debugging Notes
 
 ### Claude nesting detection
-The `claude` binary detects when it's spawned inside another Claude Code session via env vars (`CLAUDECODE`, `CLAUDE_CODE_SSE_PORT`, `CLAUDE_CODE_ENTRYPOINT`). When detected, the process hangs silently (no stdout, no stderr, no exit). Fix: `main.js` scrubs all `CLAUDE*` env vars from `process.env` at startup, and `claudeManager.js` uses `getCleanEnv()` which deletes them from the spawn env. This allows running the app from inside a Claude Code terminal.
+The `claude` binary detects when it's spawned inside another Claude Code session via env vars (`CLAUDECODE`, `CLAUDE_CODE_SSE_PORT`, `CLAUDE_CODE_ENTRYPOINT`). When detected, the process hangs silently (no stdout, no stderr, no exit). Fix: `main.js` scrubs all `CLAUDE*` env vars from `process.env` at startup, and `ptyManager.js` uses `getCleanEnv()` which deletes them from the spawn env.
 
-### Stream-JSON message format
-The `--output-format stream-json` from `claude -p` does **NOT** use the Anthropic API streaming format (no `message_start`, `content_block_delta`, etc.). Instead it outputs **complete messages** as NDJSON:
-- `{"type":"assistant","message":{"role":"assistant","content":[...]}}`
-- `{"type":"user","message":{"role":"user","content":[{"type":"tool_result",...}]}}`
-- `{"type":"result","subtype":"success","session_id":"...","permission_denials":[...]}`
-
-### Stream-JSON input format
-The `--input-format stream-json` expects NDJSON on stdin with this schema:
-```json
-{"type":"user","message":{"role":"user","content":"prompt text"},"session_id":"default","parent_tool_use_id":null}
+### JSONL path encoding
+Claude encodes the project path by replacing both `/` AND `_` with `-`. For example:
 ```
-**NOT** `{"type":"user_message","content":"..."}` — the `type` is `"user"` and `content` is nested inside a `message` object with a `role` field.
+/Users/me/my_project → -Users-me-my-project
+```
+The regex is `/[/_]/g`. Getting this wrong means you watch the wrong directory and never find the session file.
 
-### --verbose is required for stream-json
-`claude -p --output-format stream-json` requires `--verbose` flag or it errors with: "When using --print, --output-format=stream-json requires --verbose"
+### JSONL files are NOT in a sessions/ subdirectory
+Despite what some docs suggest, `.jsonl` files are directly in `~/.claude/projects/<encoded-path>/`, not in a `sessions/` subdirectory.
 
-### AskUserQuestion is denied in --dangerously-skip-permissions
-With `--dangerously-skip-permissions`, `AskUserQuestion` tool calls are auto-denied. The session exits with a `result` event containing `permission_denials` array. The question data is available in `permission_denials[].tool_input`. To continue: save the `session_id` from the result event, then spawn a new `claude -p --resume <sessionId>` with the user's answer.
+### Session file detection race condition
+When you spawn Claude, the JSONL file doesn't exist immediately. The snapshot-based approach handles this: snapshot before spawn, watch for new files after. The chokidar `add` event fires when the new file appears.
+
+### Wrong session file tracking
+If you watch for "any changed JSONL file," the watcher will track whichever session is most active — which might be a different Claude session (like the one you're running this app from). The snapshot diff + permanent file locking approach prevents this.
 
 ### Vite watches worktree files
 Vite's file watcher sees changes in `.worktrees/` (since `renderer.root: '.'`). When Claude edits files in a worktree, Vite triggers a page reload, destroying all renderer state. Fix: `electron.vite.config.js` ignores `.worktrees/**` in the server watch config.
 
 ### Electron main process doesn't inherit shell env vars
-macOS Electron apps launched via GUI (not from terminal) don't get `$SHELL`, `$USER`, or a full `$PATH`. `claudeManager.js` resolves the `claude` binary via `findClaudeBinary()` which checks `~/.local/bin/claude`, `/usr/local/bin/claude`, `/opt/homebrew/bin/claude`, then falls back to `which claude`. Claude is spawned through `/bin/sh -c` (not login shell, to avoid profile sourcing that may re-set Claude env vars).
+macOS Electron apps launched via GUI don't get `$SHELL`, `$USER`, or a full `$PATH`. `ptyManager.js` resolves the `claude` binary via `findClaudeBinary()` which checks `~/.local/bin/claude`, `/usr/local/bin/claude`, `/opt/homebrew/bin/claude`, then falls back to `which claude`.
 
 ### electron-vite hot reload only covers renderer
-When modifying `electron/` main process files, the dev server does NOT always restart the main process. You must **stop and restart `npm run dev`** to pick up main process changes. Renderer changes (src/) hot-reload normally.
-
-### Task creation is decoupled from session spawn
-In `ipc.js`, `tasks:create` wraps `claudeManager.startSession()` in a try/catch so spawn failures don't prevent the task from being created. The task appears on the kanban regardless.
+When modifying `electron/` main process files, you must **stop and restart `npm run dev`**. Renderer changes (`src/`) hot-reload normally.
 
 ### Process cleanup on app quit
-`main.js` calls `claudeManager.stopAll()` on the `before-quit` event to kill all spawned `claude -p` processes. Without this, processes become orphans.
+`main.js` calls `ptyManager.killAll()` and `jsonlWatcher.stopAll()` on the `before-quit` event. Without this, PTY processes become orphans.
 
-### NDJSON parsing
-Claude's stream-json output is newline-delimited JSON. The claudeManager buffers stdout and splits on newlines, parsing each complete line as JSON. Incomplete lines are kept in the buffer until the next chunk arrives.
+### node-pty rebuild on macOS
+If CLT C++ headers are not found (`fatal error: 'functional' file not found`), use the CXXFLAGS workaround in the rebuild script. This is a known issue with broken Xcode Command Line Tools installations.
+
+### Permission prompt detection limitations
+There is no specific JSONL event for "Claude is waiting for permission approval." The current approach uses a 5-second stale timer: if the last event is a `tool_use` and the file hasn't changed in 5s, assume "needs-input." False positives occur with slow Bash commands. Potential improvements: per-tool timeouts, PTY output pattern matching for known prompt strings.
+
+### Stream-JSON reference (from v5, useful context)
+The `--output-format stream-json` from `claude -p` outputs **complete messages** as NDJSON (not Anthropic API streaming format). Requires `--verbose` flag. Input format: `{"type":"user","message":{"role":"user","content":"prompt text"},"session_id":"default","parent_tool_use_id":null}`. With `--dangerously-skip-permissions`, `AskUserQuestion` is auto-denied and the session exits with `permission_denials` in the `result` event.

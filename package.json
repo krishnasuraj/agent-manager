@@ -8,16 +8,27 @@
     "dev": "electron-vite dev",
     "dev:seed": "electron-vite dev -- --seed",
     "build": "electron-vite build",
-    "preview": "electron-vite preview"
+    "preview": "electron-vite preview",
+    "rebuild": "CXXFLAGS=\"-I$(xcrun --show-sdk-path)/usr/include/c++/v1 -isysroot $(xcrun --show-sdk-path)\" electron-rebuild -f -w node-pty"
   },
-  "dependencies": {},
+  "dependencies": {
+    "node-pty": "^1.0.0"
+  },
   "devDependencies": {
     "@tailwindcss/vite": "^4.2.1",
     "@vitejs/plugin-react": "^5.1.4",
+    "@xterm/addon-fit": "^0.10.0",
+    "@xterm/addon-web-links": "^0.11.0",
+    "@xterm/addon-serialize": "^0.13.0",
+    "@xterm/xterm": "^5.5.0",
+    "chokidar": "^4.0.3",
     "electron": "^33.4.11",
+    "@electron/rebuild": "^4.0.0",
     "electron-vite": "^5.0.0",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1",
     "tailwindcss": "^4.2.1",
     "vite": "^7.3.1"
   }

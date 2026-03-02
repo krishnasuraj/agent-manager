@@ -1,5 +1,8 @@
 import { useState, useRef, useEffect } from 'react'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import { useSession } from '../hooks/useSession'
+import { useTypewriter } from '../hooks/useTypewriter'
 import ToolCallCard from './ToolCallCard'
 
 const statusDot = {
@@ -10,7 +13,7 @@ const statusDot = {
 }
 
 export default function SessionPanel({ task, onClose }) {
-  const { messages, isStreaming, pendingQuestion, sendMessage, abort } = useSession(task?.id)
+  const { messages, isStreaming, pendingQuestion, toolResultMap, sendMessage, abort } = useSession(task?.id)
   const [inputText, setInputText] = useState('')
   const messagesEndRef = useRef(null)
   const textareaRef = useRef(null)
@@ -39,6 +42,15 @@ export default function SessionPanel({ task, onClose }) {
 
   function handleOptionClick(option) {
     sendMessage(option.label)
+  }
+
+  // Find last assistant message index for typewriter
+  let lastAssistantIdx = -1
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role === 'assistant') {
+      lastAssistantIdx = i
+      break
+    }
   }
 
   return (
@@ -80,9 +92,31 @@ export default function SessionPanel({ task, onClose }) {
 
       {/* Messages area */}
       <div className="flex-1 overflow-y-auto px-4 py-3 space-y-3 min-h-0">
-        {messages.map((msg, i) => (
-          <MessageBubble key={i} message={msg} />
-        ))}
+        {messages.map((msg, i) => {
+          if (msg.role === 'user') {
+            return (
+              <div key={i} className="flex justify-end">
+                <div className="rounded-lg bg-surface-2 px-3 py-2 text-sm text-text-primary max-w-[80%] whitespace-pre-wrap font-mono">
+                  {msg.content}
+                </div>
+              </div>
+            )
+          }
+
+          if (msg.role === 'assistant') {
+            return (
+              <AssistantMessage
+                key={i}
+                message={msg}
+                toolResultMap={toolResultMap}
+                isLastAssistant={i === lastAssistantIdx}
+                isStreaming={isStreaming}
+              />
+            )
+          }
+
+          return null
+        })}
 
         {/* Pending question from AskUserQuestion */}
         {pendingQuestion && (
@@ -144,6 +178,29 @@ export default function SessionPanel({ task, onClose }) {
   )
 }
 
+function AssistantMessage({ message, toolResultMap, isLastAssistant, isStreaming }) {
+  const shouldAnimate = isLastAssistant && isStreaming
+  const { displayText, isTyping } = useTypewriter(message.content || '', shouldAnimate)
+
+  return (
+    <div className="space-y-1.5">
+      {displayText && (
+        <div className="prose-chat">
+          <ReactMarkdown remarkPlugins={[remarkGfm]}>{displayText}</ReactMarkdown>
+          {isTyping && <span className="cursor-blink text-text-muted">|</span>}
+        </div>
+      )}
+      {message.toolCalls?.map((tc, i) => {
+        const result = toolResultMap[tc.id] || null
+        const status = result ? (result.isError ? 'error' : 'done') : 'running'
+        return (
+          <ToolCallCard key={tc.id || i} name={tc.name} input={tc.input} result={result} status={status} />
+        )
+      })}
+    </div>
+  )
+}
+
 function QuestionCard({ questions, onOptionClick }) {
   return (
     <div className="space-y-3">
@@ -168,54 +225,4 @@ function QuestionCard({ questions, onOptionClick }) {
       ))}
     </div>
   )
-}
-
-function MessageBubble({ message }) {
-  if (message.role === 'user') {
-    return (
-      <div className="flex justify-end">
-        <div className="rounded-lg bg-surface-2 px-3 py-2 text-sm text-text-primary max-w-[80%] whitespace-pre-wrap font-mono">
-          {message.content}
-        </div>
-      </div>
-    )
-  }
-
-  if (message.role === 'assistant') {
-    return (
-      <div className="space-y-1.5">
-        {message.content && (
-          <div className="text-sm text-text-primary whitespace-pre-wrap font-mono leading-relaxed">
-            {message.content}
-          </div>
-        )}
-        {message.toolCalls?.map((tc, i) => (
-          <ToolCallCard key={i} name={tc.name} input={tc.input} status="done" />
-        ))}
-      </div>
-    )
-  }
-
-  if (message.role === 'tool_result') {
-    return (
-      <div className="space-y-1.5">
-        {message.toolResults?.map((tr, i) => (
-          <div
-            key={i}
-            className={`rounded-lg border px-3 py-2 text-xs font-mono max-h-32 overflow-y-auto whitespace-pre-wrap break-all ${
-              tr.isError
-                ? 'border-red-500/30 bg-red-500/10 text-red-400'
-                : 'border-border bg-surface-1 text-text-secondary'
-            }`}
-          >
-            {typeof tr.content === 'string'
-              ? tr.content
-              : JSON.stringify(tr.content, null, 2)}
-          </div>
-        ))}
-      </div>
-    )
-  }
-
-  return null
 }

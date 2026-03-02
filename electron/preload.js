@@ -1,36 +1,34 @@
 import { contextBridge, ipcRenderer } from 'electron'
 
 contextBridge.exposeInMainWorld('electronAPI', {
-  // Tasks
-  getTasks: () => ipcRenderer.invoke('tasks:getAll'),
-  createTask: (data) => ipcRenderer.invoke('tasks:create', data),
-  deleteTask: (taskId) => ipcRenderer.invoke('tasks:delete', taskId),
+  // PTY
+  onPtyData: (cb) => {
+    const handler = (_, sessionId, data) => cb(sessionId, data)
+    ipcRenderer.on('pty:data', handler)
+    return () => ipcRenderer.removeListener('pty:data', handler)
+  },
+  onPtyExit: (cb) => {
+    const handler = (_, sessionId, info) => cb(sessionId, info)
+    ipcRenderer.on('pty:exit', handler)
+    return () => ipcRenderer.removeListener('pty:exit', handler)
+  },
+  ptyWrite: (sessionId, data) => ipcRenderer.send('pty:write', sessionId, data),
+  ptyResize: (sessionId, cols, rows) => ipcRenderer.send('pty:resize', sessionId, cols, rows),
 
-  onTaskCreated: (cb) => {
-    const handler = (_, task) => cb(task)
-    ipcRenderer.on('task:created', handler)
-    return () => ipcRenderer.removeListener('task:created', handler)
-  },
-  onTaskUpdated: (cb) => {
-    const handler = (_, task) => cb(task)
-    ipcRenderer.on('task:updated', handler)
-    return () => ipcRenderer.removeListener('task:updated', handler)
-  },
-  onTaskDeleted: (cb) => {
-    const handler = (_, taskId) => cb(taskId)
-    ipcRenderer.on('task:deleted', handler)
-    return () => ipcRenderer.removeListener('task:deleted', handler)
-  },
+  // Session lifecycle
+  spawnSession: (sessionId, opts) => ipcRenderer.invoke('session:spawn', sessionId, opts),
+  pickFolder: () => ipcRenderer.invoke('dialog:pick-folder'),
+  listRecentSessions: (cwd) => ipcRenderer.invoke('sessions:list-recent', cwd),
 
-  // Session
-  sendMessage: (taskId, text) =>
-    ipcRenderer.invoke('session:send-message', { taskId, text }),
-  abortSession: (taskId) =>
-    ipcRenderer.send('session:abort', taskId),
-  onSessionEvent: (taskId, cb) => {
-    const channel = `session:event:${taskId}`
-    const handler = (_, event) => cb(event)
-    ipcRenderer.on(channel, handler)
-    return () => ipcRenderer.removeListener(channel, handler)
+  // JSONL state
+  onJsonlEvent: (cb) => {
+    const handler = (_, sessionId, entry) => cb(sessionId, entry)
+    ipcRenderer.on('jsonl:event', handler)
+    return () => ipcRenderer.removeListener('jsonl:event', handler)
+  },
+  onJsonlState: (cb) => {
+    const handler = (_, sessionId, state) => cb(sessionId, state)
+    ipcRenderer.on('jsonl:state', handler)
+    return () => ipcRenderer.removeListener('jsonl:state', handler)
   },
 })

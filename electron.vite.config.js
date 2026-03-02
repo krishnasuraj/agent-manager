@@ -13,7 +13,10 @@ export default defineConfig({
       lib: {
         entry: resolve(__dirname, 'electron/main.js'),
       },
-},
+      rollupOptions: {
+        external: ['node-pty'],
+      },
+    },
   },
   preload: {
     build: {
