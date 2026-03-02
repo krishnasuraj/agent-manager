@@ -102,6 +102,7 @@ export function createPtyManager(getWindow) {
       // Claude Code prints its header with ╭ or shows "Claude Code" or thinking spinner
       if (/╭|Claude Code|\*\s+[A-Z][a-z]+[.…]/.test(recent)) {
         session.claudeRunning = true
+        session.outputBuffer = ''  // clear so stale shell prompts don't trigger false exit
         console.log(`[ptyManager:${sessionId}] Claude detected as running`)
       }
       return

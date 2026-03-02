@@ -243,36 +243,33 @@ export function createJsonlWatcher(getWindow) {
       depth: 1,
     })
 
-    // Detect new JSONL files via snapshot diff
+    // Track new files we haven't seen before, but don't lock yet
     watcher.on('add', (filePath) => {
-      if (state.locked) return
       if (!filePath.endsWith('.jsonl')) return
-      if (state.knownFiles.has(filePath)) return
-
-      console.log(`[jsonlWatcher:${sessionId}] LOCKED to new session file: ${path.basename(filePath)}`)
-      state.filePath = filePath
-      state.bytesRead = 0
-      state.locked = true
-      sendToRenderer('jsonl:session-started', sessionId)
-      readNewLines(sessionId, state)
+      if (!state.knownFiles.has(filePath)) {
+        // Record it with size 0 so the change handler can detect growth
+        console.log(`[jsonlWatcher:${sessionId}] new file appeared: ${path.basename(filePath)}`)
+        state.knownFiles.set(filePath, 0)
+      }
     })
 
-    // Tail the locked file when it changes, or detect resumed sessions
+    // Lock onto whichever file is actively being written to
     watcher.on('change', (filePath) => {
       if (!filePath.endsWith('.jsonl')) return
 
-      // If unlocked, this could be a resumed session writing to an existing file
+      // If unlocked, lock onto the first file that's growing
       if (!state.locked) {
         const snapshotSize = state.knownFiles.get(filePath)
-        if (snapshotSize === undefined) return // unknown file, ignore
+        if (snapshotSize === undefined) return
 
         let currentSize
         try { currentSize = fs.statSync(filePath).size } catch { return }
-        if (currentSize <= snapshotSize) return // file didn't grow
+        if (currentSize <= snapshotSize) return
 
-        console.log(`[jsonlWatcher:${sessionId}] LOCKED to resumed session file: ${path.basename(filePath)} (grew from ${snapshotSize} to ${currentSize})`)
+        const isResume = snapshotSize > 0
+        console.log(`[jsonlWatcher:${sessionId}] LOCKED to ${isResume ? 'resumed' : 'new'} session file: ${path.basename(filePath)} (${snapshotSize} → ${currentSize})`)
         state.filePath = filePath
-        state.bytesRead = 0  // read from beginning to get full history
+        state.bytesRead = isResume ? 0 : snapshotSize  // read full history for resumed, only new for fresh
         state.locked = true
         sendToRenderer('jsonl:session-started', sessionId)
         readNewLines(sessionId, state)
@@ -375,6 +372,7 @@ export function createJsonlWatcher(getWindow) {
 
           // Detect Claude session end — the "result" event means Claude exited
           if (event.type === 'result') {
+            console.log(`[jsonlWatcher:${sessionId}] result event detected — ending session via JSONL`)
             sendToRenderer('jsonl:state', sessionId, { state: 'done', summary: 'Session complete' })
             sendToRenderer('jsonl:session-ended', sessionId)
 
