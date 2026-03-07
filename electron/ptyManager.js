@@ -114,6 +114,7 @@ export function createPtyManager(getWindow) {
       // Claude Code prints its header with ╭ or shows "Claude Code" or thinking spinner
       if (/╭|Claude Code|\*\s+[A-Z][a-z]+[.…]/.test(recent)) {
         session.claudeRunning = true
+        session.pendingShellReturn = null
         session.outputBuffer = ''  // clear so stale shell prompts don't trigger false exit
         console.log(`[ptyManager:${sessionId}] Claude detected as running`)
       }
@@ -228,7 +229,7 @@ export function createPtyManager(getWindow) {
     // Optionally auto-launch claude in the PTY
     if (autoLaunch || claudeSessionId) {
       setTimeout(() => {
-        let cmd = claudeBin
+        let cmd = 'claude'
         if (claudeSessionId) {
           cmd += ` --resume "${claudeSessionId}"`
         }
@@ -290,6 +291,23 @@ export function createPtyManager(getWindow) {
   }
 
   /**
+   * Get the current working directory of a session's PTY process.
+   * Uses lsof on macOS to read the actual cwd (reflects cd navigation).
+   */
+  function getCwd(sessionId) {
+    const session = sessions.get(sessionId)
+    if (!session) return null
+    try {
+      const pid = session.pty.pid
+      const output = execSync(`lsof -a -d cwd -Fn -p ${pid}`, { encoding: 'utf8', timeout: 2000 })
+      const match = output.match(/\nn(.+)/)
+      return match ? match[1] : session.cwd
+    } catch {
+      return session.cwd
+    }
+  }
+
+  /**
    * Register a callback that fires when a permission prompt is detected
    * in the PTY output for a given session.
    */
@@ -320,5 +338,5 @@ export function createPtyManager(getWindow) {
     }
   }
 
-  return { spawn, write, resize, kill, killAll, has, onPermissionPrompt, onThinking, onShellReturn }
+  return { spawn, write, resize, kill, killAll, has, getCwd, onPermissionPrompt, onThinking, onShellReturn }
 }

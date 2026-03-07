@@ -44,17 +44,22 @@ function createWindow() {
     ptyManager.resize(sessionId, cols, rows)
   })
 
-  // IPC: Spawn a new session — just a shell, user starts Claude themselves
+  // IPC: Get the current working directory of a session's PTY
+  ipcMain.handle('session:getCwd', (_, sessionId) => {
+    return ptyManager.getCwd(sessionId)
+  })
+
+  // IPC: Spawn a new session
   ipcMain.handle('session:spawn', (_, sessionId, opts) => {
     const cwd = opts.cwd || process.cwd()
 
     // Snapshot all .jsonl files globally BEFORE spawning
     const existingFiles = jsonlWatcher.snapshotFiles()
 
-    ptyManager.spawn(sessionId, { cwd })
+    ptyManager.spawn(sessionId, { cwd, autoLaunch: true })
 
     // Watch all of ~/.claude/projects/ for any new .jsonl file
-    jsonlWatcher.startWatching(sessionId, { existingFiles })
+    jsonlWatcher.startWatching(sessionId, { existingFiles, cwd })
 
     // Wire PTY signals → JSONL watcher for instant state transitions
     ptyManager.onThinking(sessionId, (sid) => {

@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback, memo } from 'react'
+import { useState, useEffect, useRef, useMemo, memo } from 'react'
 
 const STATE_STYLES = {
   working: { color: 'text-status-running', bg: 'bg-status-running', label: 'Working', pulse: true },
@@ -49,19 +49,12 @@ export default function StateLog({ sessionId }) {
   const [currentState, setCurrentState] = useState({ state: 'idle', summary: 'Waiting...' })
   const [events, setEvents] = useState([])
   const scrollRef = useRef(null)
-  const isNearBottomRef = useRef(true)
 
-  const checkNearBottom = useCallback(() => {
-    const el = scrollRef.current
-    if (!el) return
-    // "Near bottom" = within 60px of the bottom edge
-    isNearBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 60
-  }, [])
+  const reversedEvents = useMemo(() => [...events].reverse(), [events])
 
   useEffect(() => {
     setCurrentState({ state: 'idle', summary: 'Waiting...' })
     setEvents([])
-    isNearBottomRef.current = true
 
     if (!sessionId) return
 
@@ -120,10 +113,9 @@ export default function StateLog({ sessionId }) {
         )}
       </div>
 
-      {/* Event log — newest at bottom */}
+      {/* Event log — newest at top */}
       <div
         ref={scrollRef}
-        onScroll={checkNearBottom}
         className="flex-1 overflow-y-auto min-h-0"
       >
         {events.length === 0 ? (
@@ -132,7 +124,7 @@ export default function StateLog({ sessionId }) {
           </div>
         ) : (
           <div className="divide-y divide-border/50">
-            {[...events].reverse().map((entry, i) => (
+            {reversedEvents.map((entry, i) => (
               <EventRow key={events.length - 1 - i} entry={entry} />
             ))}
           </div>

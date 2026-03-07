@@ -57,6 +57,10 @@ function deriveState(events, lastWriteTime) {
       return { state: 'working', summary: `${lastTool.name}: ${formatToolInput(lastTool)}` }
     }
 
+    if (content.some((b) => b.type === 'thinking')) {
+      return { state: 'working', summary: 'Thinking...' }
+    }
+
     const textBlocks = content.filter((b) => b.type === 'text')
     if (textBlocks.length > 0 && timeSinceWrite < 5000) {
       return { state: 'working', summary: 'Responding...' }
@@ -87,11 +91,11 @@ function deriveState(events, lastWriteTime) {
 function formatToolInput(toolUse) {
   const input = toolUse.input || {}
   switch (toolUse.name) {
-    case 'Read': return input.file_path ? path.basename(input.file_path) : ''
+    case 'Read':
     case 'Write':
     case 'Edit': return input.file_path ? path.basename(input.file_path) : ''
     case 'Bash': return (input.command || '').slice(0, 60)
-    case 'Glob': return input.pattern || ''
+    case 'Glob':
     case 'Grep': return input.pattern || ''
     default: return ''
   }

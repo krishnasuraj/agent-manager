@@ -17,6 +17,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Session lifecycle
   spawnSession: (sessionId, opts) => ipcRenderer.invoke('session:spawn', sessionId, opts),
+  getSessionCwd: (sessionId) => ipcRenderer.invoke('session:getCwd', sessionId),
   pickFolder: () => ipcRenderer.invoke('dialog:pick-folder'),
   listRecentSessions: (cwd) => ipcRenderer.invoke('sessions:list-recent', cwd),
 
