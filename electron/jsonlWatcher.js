@@ -82,6 +82,12 @@ function deriveState(events, lastWriteTime) {
   }
 
   if (last.type === 'user') {
+    // If 5s+ since last write and no thinking spinner detected (notifyThinking
+    // would have overridden state), Claude has finished processing and is idle.
+    // Thinking spinners appear within 1-2s, so 5s of silence is a safe threshold.
+    if (timeSinceWrite > 5000) {
+      return { state: 'idle', summary: 'Waiting for prompt' }
+    }
     return { state: 'working', summary: 'Processing prompt...' }
   }
 
