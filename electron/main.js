@@ -1,7 +1,9 @@
 import { app, BrowserWindow, ipcMain, dialog } from 'electron'
 import path from 'path'
+import fs from 'fs'
 import { createPtyManager } from './ptyManager.js'
 import { createJsonlWatcher } from './jsonlWatcher.js'
+import { createWorktreeManager } from './worktreeManager.js'
 
 // Scrub Claude env vars so child processes don't inherit nesting detection
 for (const key of Object.keys(process.env)) {
@@ -9,6 +11,10 @@ for (const key of Object.keys(process.env)) {
     delete process.env[key]
   }
 }
+
+// Parse --test-sessions=N from CLI args
+const testSessionsArg = process.argv.find((a) => a.startsWith('--test-sessions='))
+const testSessionCount = testSessionsArg ? parseInt(testSessionsArg.split('=')[1], 10) || 0 : 0
 
 let mainWindow = null
 
@@ -18,6 +24,81 @@ function getWindow() {
 
 const ptyManager = createPtyManager(getWindow)
 const jsonlWatcher = createJsonlWatcher(getWindow)
+const worktreeManager = createWorktreeManager(process.cwd())
+
+// ─── IPC handlers (registered once, outside createWindow) ───────────
+
+// PTY input from renderer
+ipcMain.on('pty:write', (_, sessionId, data) => {
+  ptyManager.write(sessionId, data)
+})
+
+ipcMain.on('pty:resize', (_, sessionId, cols, rows) => {
+  ptyManager.resize(sessionId, cols, rows)
+})
+
+// Test config
+ipcMain.handle('app:getTestConfig', () => {
+  const testCwds = []
+  const testBranches = []
+  for (let i = 0; i < testSessionCount; i++) {
+    const branch = `test-${i + 1}`
+    const { worktreePath } = worktreeManager.create(branch)
+    testCwds.push(worktreePath)
+    testBranches.push(branch)
+  }
+  return { testSessions: testSessionCount, testCwds, testBranches }
+})
+
+// Worktree operations
+ipcMain.handle('worktree:create', (_, branch) => {
+  const { worktreePath, existing } = worktreeManager.create(branch)
+  return { branch, worktreePath, existing }
+})
+
+ipcMain.handle('worktree:isDirty', (_, branch) => {
+  return { dirty: worktreeManager.isDirty(branch) }
+})
+
+ipcMain.handle('worktree:remove', (_, branch, force) => {
+  worktreeManager.remove(branch, { force })
+  return { ok: true }
+})
+
+// Session lifecycle
+ipcMain.handle('session:getCwd', (_, sessionId) => {
+  return ptyManager.getCwd(sessionId)
+})
+
+ipcMain.handle('session:kill', (_, sessionId) => {
+  ptyManager.kill(sessionId)
+  jsonlWatcher.stopWatching(sessionId)
+  return { ok: true }
+})
+
+ipcMain.handle('session:spawn', (_, sessionId, opts) => {
+  const cwd = opts.cwd || process.cwd()
+
+  const existingFiles = jsonlWatcher.snapshotFiles()
+
+  ptyManager.spawn(sessionId, { cwd, autoLaunch: true, initialPrompt: opts.initialPrompt })
+
+  jsonlWatcher.startWatching(sessionId, { existingFiles, cwd })
+
+  ptyManager.onThinking(sessionId, (sid) => {
+    jsonlWatcher.notifyThinking(sid)
+  })
+  ptyManager.onPermissionPrompt(sessionId, (sid) => {
+    jsonlWatcher.notifyPermissionPrompt(sid)
+  })
+  ptyManager.onShellReturn(sessionId, (sid) => {
+    jsonlWatcher.notifyShellReturn(sid)
+  })
+
+  return { sessionId, cwd }
+})
+
+// ─── Window ─────────────────────────────────────────────────────────
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -33,46 +114,6 @@ function createWindow() {
       contextIsolation: true,
       sandbox: false,
     },
-  })
-
-  // IPC: PTY input from renderer
-  ipcMain.on('pty:write', (_, sessionId, data) => {
-    ptyManager.write(sessionId, data)
-  })
-
-  ipcMain.on('pty:resize', (_, sessionId, cols, rows) => {
-    ptyManager.resize(sessionId, cols, rows)
-  })
-
-  // IPC: Get the current working directory of a session's PTY
-  ipcMain.handle('session:getCwd', (_, sessionId) => {
-    return ptyManager.getCwd(sessionId)
-  })
-
-  // IPC: Spawn a new session
-  ipcMain.handle('session:spawn', (_, sessionId, opts) => {
-    const cwd = opts.cwd || process.cwd()
-
-    // Snapshot all .jsonl files globally BEFORE spawning
-    const existingFiles = jsonlWatcher.snapshotFiles()
-
-    ptyManager.spawn(sessionId, { cwd, autoLaunch: true })
-
-    // Watch all of ~/.claude/projects/ for any new .jsonl file
-    jsonlWatcher.startWatching(sessionId, { existingFiles, cwd })
-
-    // Wire PTY signals → JSONL watcher for instant state transitions
-    ptyManager.onThinking(sessionId, (sid) => {
-      jsonlWatcher.notifyThinking(sid)
-    })
-    ptyManager.onPermissionPrompt(sessionId, (sid) => {
-      jsonlWatcher.notifyPermissionPrompt(sid)
-    })
-    ptyManager.onShellReturn(sessionId, (sid) => {
-      jsonlWatcher.notifyShellReturn(sid)
-    })
-
-    return { sessionId, cwd }
   })
 
   if (process.env.ELECTRON_RENDERER_URL) {

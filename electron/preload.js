@@ -15,8 +15,17 @@ contextBridge.exposeInMainWorld('electronAPI', {
   ptyWrite: (sessionId, data) => ipcRenderer.send('pty:write', sessionId, data),
   ptyResize: (sessionId, cols, rows) => ipcRenderer.send('pty:resize', sessionId, cols, rows),
 
+  // App config
+  getTestConfig: () => ipcRenderer.invoke('app:getTestConfig'),
+
+  // Worktree
+  worktreeCreate: (branch) => ipcRenderer.invoke('worktree:create', branch),
+  worktreeIsDirty: (branch) => ipcRenderer.invoke('worktree:isDirty', branch),
+  worktreeRemove: (branch, force) => ipcRenderer.invoke('worktree:remove', branch, force),
+
   // Session lifecycle
   spawnSession: (sessionId, opts) => ipcRenderer.invoke('session:spawn', sessionId, opts),
+  killSession: (sessionId) => ipcRenderer.invoke('session:kill', sessionId),
   getSessionCwd: (sessionId) => ipcRenderer.invoke('session:getCwd', sessionId),
   pickFolder: () => ipcRenderer.invoke('dialog:pick-folder'),
   listRecentSessions: (cwd) => ipcRenderer.invoke('sessions:list-recent', cwd),
