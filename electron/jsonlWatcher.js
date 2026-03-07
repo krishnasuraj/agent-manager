@@ -6,9 +6,15 @@
 // The encoded path replaces slashes and underscores with dashes:
 //   /Users/me/my_project → -Users-me-my-project
 //
-// Strategy: snapshot existing .jsonl files BEFORE spawning Claude,
-// then watch for a NEW file that wasn't in the snapshot. That's the
-// session's file. Only tail that one file — never switch.
+// Architecture: ONE global chokidar watcher for all sessions. Each file-change
+// event fires a single callback that routes to the owning session. This eliminates
+// the race condition that occurred with N independent watchers all watching the
+// same directory — where a non-deterministic callback ordering caused the wrong
+// session to claim a JSONL file.
+//
+// File assignment: when a new JSONL file starts growing, prefer the session whose
+// cwd matches the file's project directory. Falls back to any unlocked session
+// (for the case where the user cd'd to a different directory inside their shell).
 
 import fs from 'fs'
 import path from 'path'
@@ -91,6 +97,20 @@ function formatToolInput(toolUse) {
   }
 }
 
+function formatToolResultContent(content) {
+  if (typeof content === 'string') return content
+  if (Array.isArray(content)) {
+    return content
+      .map((b) => {
+        if (typeof b === 'string') return b
+        if (b.type === 'text') return b.text
+        return JSON.stringify(b)
+      })
+      .join('\n')
+  }
+  return JSON.stringify(content, null, 2)
+}
+
 function eventToLogEntry(event) {
   const timestamp = event.timestamp
     ? new Date(event.timestamp).toLocaleTimeString('en-US', { hour12: false })
@@ -99,11 +119,13 @@ function eventToLogEntry(event) {
   if (event.type === 'user') {
     const content = event.message?.content
     if (typeof content === 'string') {
-      return { timestamp, icon: '👤', label: 'User prompt', detail: content.slice(0, 80) }
+      return { timestamp, icon: '👤', label: 'User prompt', detail: content.slice(0, 80), expanded: content }
     }
     const blocks = Array.isArray(content) ? content : []
     if (blocks.some((b) => b.type === 'tool_result')) {
-      return { timestamp, icon: '✅', label: 'Tool result', detail: `${blocks.filter((b) => b.type === 'tool_result').length} result(s)` }
+      const results = blocks.filter((b) => b.type === 'tool_result')
+      const expandedText = results.map((r) => formatToolResultContent(r.content)).join('\n---\n')
+      return { timestamp, icon: '✅', label: 'Tool result', detail: `${results.length} result(s)`, expanded: expandedText }
     }
     return { timestamp, icon: '👤', label: 'User', detail: '' }
   }
@@ -118,21 +140,27 @@ function eventToLogEntry(event) {
         icon: toolIcon(t.name),
         label: t.name,
         detail: formatToolInput(t),
+        expanded: JSON.stringify(t.input || {}, null, 2),
       }))
     }
 
-    if (blocks.find((b) => b.type === 'thinking')) {
-      return { timestamp, icon: '🤔', label: 'Thinking', detail: '' }
+    const thinkingBlock = blocks.find((b) => b.type === 'thinking')
+    if (thinkingBlock) {
+      return { timestamp, icon: '🤔', label: 'Thinking', detail: '', expanded: thinkingBlock.thinking || '' }
     }
 
     const text = blocks.filter((b) => b.type === 'text').map((b) => b.text).join('')
     if (text) {
-      return { timestamp, icon: '💬', label: 'Response', detail: text.slice(0, 80) }
+      return { timestamp, icon: '💬', label: 'Response', detail: text.slice(0, 80), expanded: text }
     }
   }
 
   if (event.type === 'system') {
-    return { timestamp, icon: '⚙️', label: 'System', detail: '' }
+    const content = event.message?.content
+    const text = typeof content === 'string' ? content : Array.isArray(content)
+      ? content.filter((b) => b.type === 'text').map((b) => b.text).join('')
+      : ''
+    return { timestamp, icon: '⚙️', label: 'System', detail: '', expanded: text || undefined }
   }
 
   return null
@@ -151,7 +179,14 @@ function toolIcon(name) {
 // ─── Exported module ─────────────────────────────────────────────
 
 export function createJsonlWatcher(getWindow) {
-  const watchers = new Map()
+  // One chokidar instance for all sessions
+  let globalWatcher = null
+
+  // sessionId → per-session state
+  const sessionStates = new Map()
+
+  // filePath → sessionId: which session owns each JSONL file
+  const fileOwners = new Map()
 
   function sendToRenderer(channel, ...args) {
     const win = getWindow()
@@ -160,10 +195,6 @@ export function createJsonlWatcher(getWindow) {
     }
   }
 
-  /**
-   * Encode a directory path the way Claude Code does:
-   * /Users/me/my_project → -Users-me-my-project
-   */
   function encodeProjectPath(dirPath) {
     return dirPath.replace(/[/_]/g, '-')
   }
@@ -178,12 +209,7 @@ export function createJsonlWatcher(getWindow) {
 
   /**
    * Snapshot all existing .jsonl files across ALL project dirs.
-   * Returns a Set of full paths. Call BEFORE spawning so we can diff later.
-   */
-  /**
-   * Snapshot all existing .jsonl files across ALL project dirs.
    * Returns a Map of full path → file size in bytes.
-   * Call BEFORE spawning so we can diff later.
    */
   function snapshotFiles() {
     const root = getProjectsRoot()
@@ -209,20 +235,91 @@ export function createJsonlWatcher(getWindow) {
   }
 
   /**
-   * Start watching for any new JSONL file across all project dirs.
-   * When the user starts Claude in any directory, the watcher picks it up.
+   * Route a file-change event to the correct session.
+   * Called once per change event — no race between multiple watchers.
+   */
+  function routeFileChange(filePath) {
+    // Route to the session that already owns this file
+    const ownerId = fileOwners.get(filePath)
+    if (ownerId) {
+      const state = sessionStates.get(ownerId)
+      if (state) {
+        processChange(ownerId, state, filePath)
+      }
+      return
+    }
+
+    const fileProjectDir = path.dirname(filePath)
+
+    // First pass: prefer the session whose spawn cwd maps to this file's project dir.
+    // This is correct for the common case of sessions in different directories.
+    for (const [sessionId, state] of sessionStates) {
+      if (state.locked) continue
+      if (getProjectDir(state.cwd) !== fileProjectDir) continue
+      if (tryClaimFile(sessionId, state, filePath)) return
+    }
+
+    // Second pass: any unlocked session (covers the case where the user cd'd inside
+    // the shell before starting Claude, so the cwd doesn't match the file's dir).
+    for (const [sessionId, state] of sessionStates) {
+      if (state.locked) continue
+      if (tryClaimFile(sessionId, state, filePath)) return
+    }
+  }
+
+  /**
+   * Attempt to lock sessionId onto filePath. Returns true if successful.
+   */
+  function tryClaimFile(sessionId, state, filePath) {
+    const snapshotSize = state.knownFiles.get(filePath)
+    if (snapshotSize === undefined) return false
+
+    let currentSize
+    try { currentSize = fs.statSync(filePath).size } catch { return false }
+    if (currentSize <= snapshotSize) return false
+
+    const isResume = snapshotSize > 0
+    console.log(`[jsonlWatcher:${sessionId}] LOCKED to ${isResume ? 'resumed' : 'new'} session file: ${path.basename(filePath)} (${snapshotSize} → ${currentSize})`)
+    fileOwners.set(filePath, sessionId)
+    state.filePath = filePath
+    state.bytesRead = isResume ? 0 : snapshotSize
+    state.locked = true
+    sendToRenderer('jsonl:session-started', sessionId)
+    readNewLines(sessionId, state)
+    return true
+  }
+
+  /**
+   * Process a change event for a session that already owns the file.
+   */
+  function processChange(sessionId, state, filePath) {
+    if (filePath !== state.filePath) return
+
+    state.lastWriteTime = Date.now()
+    readNewLines(sessionId, state)
+
+    clearTimeout(state.staleTimer)
+    state.staleTimer = setTimeout(() => {
+      const derived = deriveState(state.events, state.lastWriteTime)
+      if (derived.state === 'idle') {
+        setTimeout(() => sendToRenderer('jsonl:state', sessionId, derived), 1000)
+      } else {
+        sendToRenderer('jsonl:state', sessionId, derived)
+      }
+    }, 5000)
+  }
+
+  /**
+   * Start watching for JSONL events for a session.
    *
-   * @param {string} sessionId - Our internal session ID
+   * @param {string} sessionId
    * @param {object} opts
-   * @param {Set<string>} [opts.existingFiles] - Snapshot from before spawn (full paths)
+   * @param {Map<string,number>} [opts.existingFiles] - Snapshot from before spawn
+   * @param {string} [opts.cwd] - Working directory of this session's shell
    */
   function startWatching(sessionId, opts = {}) {
     const projectsRoot = getProjectsRoot()
-    const { existingFiles } = opts
-
-    if (!fs.existsSync(projectsRoot)) {
-      try { fs.mkdirSync(projectsRoot, { recursive: true }) } catch { /* */ }
-    }
+    const { existingFiles, cwd } = opts
 
     const state = {
       events: [],
@@ -231,84 +328,41 @@ export function createJsonlWatcher(getWindow) {
       lastWriteTime: Date.now(),
       staleTimer: null,
       locked: false,
-      knownFiles: existingFiles || new Set(),
+      knownFiles: existingFiles || new Map(),
+      cwd: cwd || process.cwd(),
     }
 
-    console.log(`[jsonlWatcher:${sessionId}] watching ${projectsRoot} (all projects)`)
+    sessionStates.set(sessionId, state)
+    console.log(`[jsonlWatcher:${sessionId}] registered (cwd: ${state.cwd})`)
 
-    const watcher = watch(projectsRoot, {
-      ignoreInitial: false,
-      awaitWriteFinish: false,
-      depth: 1,
-    })
-
-    // Track new files we haven't seen before, but don't lock yet
-    watcher.on('add', (filePath) => {
-      if (!filePath.endsWith('.jsonl')) return
-      if (!state.knownFiles.has(filePath)) {
-        // Record it with size 0 so the change handler can detect growth
-        console.log(`[jsonlWatcher:${sessionId}] new file appeared: ${path.basename(filePath)}`)
-        state.knownFiles.set(filePath, 0)
-      }
-    })
-
-    // Lock onto whichever file is actively being written to
-    watcher.on('change', (filePath) => {
-      if (!filePath.endsWith('.jsonl')) return
-
-      // If unlocked, lock onto the first file that's growing
-      if (!state.locked) {
-        const snapshotSize = state.knownFiles.get(filePath)
-        if (snapshotSize === undefined) return
-
-        let currentSize
-        try { currentSize = fs.statSync(filePath).size } catch { return }
-        if (currentSize <= snapshotSize) return
-
-        const isResume = snapshotSize > 0
-        console.log(`[jsonlWatcher:${sessionId}] LOCKED to ${isResume ? 'resumed' : 'new'} session file: ${path.basename(filePath)} (${snapshotSize} → ${currentSize})`)
-        state.filePath = filePath
-        state.bytesRead = isResume ? 0 : snapshotSize  // read full history for resumed, only new for fresh
-        state.locked = true
-        sendToRenderer('jsonl:session-started', sessionId)
-        readNewLines(sessionId, state)
-        return
+    // Start the single global watcher on first session
+    if (!globalWatcher) {
+      if (!fs.existsSync(projectsRoot)) {
+        try { fs.mkdirSync(projectsRoot, { recursive: true }) } catch { /* */ }
       }
 
-      if (filePath !== state.filePath) return
+      console.log(`[jsonlWatcher] starting global watcher on ${projectsRoot}`)
 
-      state.lastWriteTime = Date.now()
-      readNewLines(sessionId, state)
+      globalWatcher = watch(projectsRoot, {
+        ignoreInitial: false,
+        awaitWriteFinish: false,
+        depth: 1,
+      })
 
-      clearTimeout(state.staleTimer)
-      state.staleTimer = setTimeout(() => {
-        const derived = deriveState(state.events, state.lastWriteTime)
-        if (derived.state === 'idle') {
-          setTimeout(() => sendToRenderer('jsonl:state', sessionId, derived), 1000)
-        } else {
-          sendToRenderer('jsonl:state', sessionId, derived)
+      globalWatcher.on('add', (filePath) => {
+        if (!filePath.endsWith('.jsonl')) return
+        // Register new files in every session's knownFiles so they can claim it
+        for (const [, s] of sessionStates) {
+          if (!s.knownFiles.has(filePath)) {
+            s.knownFiles.set(filePath, 0)
+          }
         }
-      }, 5000)
-    })
+      })
 
-    watchers.set(sessionId, { watcher, state })
-  }
-
-  /**
-   * Read the last N events from a JSONL file (for initial status on resume).
-   */
-  function readLastEvents(filePath, count) {
-    try {
-      const content = fs.readFileSync(filePath, 'utf8')
-      const lines = content.trim().split('\n')
-      const lastLines = lines.slice(-count)
-      const events = []
-      for (const line of lastLines) {
-        try { events.push(JSON.parse(line)) } catch { /* */ }
-      }
-      return events
-    } catch {
-      return []
+      globalWatcher.on('change', (filePath) => {
+        if (!filePath.endsWith('.jsonl')) return
+        routeFileChange(filePath)
+      })
     }
   }
 
@@ -354,18 +408,12 @@ export function createJsonlWatcher(getWindow) {
             }
           }
 
-          // Detect Claude session end — the "result" event means Claude exited
+          // Detect Claude session end — the "result" event means Claude exited cleanly
           if (event.type === 'result') {
-            console.log(`[jsonlWatcher:${sessionId}] result event detected — ending session via JSONL`)
+            console.log(`[jsonlWatcher:${sessionId}] result event — session ended`)
             sendToRenderer('jsonl:state', sessionId, { state: 'done', summary: 'Session complete' })
             sendToRenderer('jsonl:session-ended', sessionId)
-
-            // Unlock watcher so it can detect the next Claude session.
-            // Re-snapshot so only truly new files get picked up.
-            state.locked = false
-            state.events = []
-            clearTimeout(state.staleTimer)
-            state.knownFiles = snapshotFiles()
+            unlockSession(sessionId, state)
             return
           }
         }
@@ -376,32 +424,34 @@ export function createJsonlWatcher(getWindow) {
     })
   }
 
-  function notifyExit(sessionId, exitCode) {
-    const entry = watchers.get(sessionId)
-    if (!entry) return
+  /**
+   * Release a session's lock on its JSONL file so it can pick up the next session.
+   */
+  function unlockSession(sessionId, state) {
+    if (state.filePath) {
+      fileOwners.delete(state.filePath)
+    }
+    state.locked = false
+    state.filePath = null
+    state.events = []
+    clearTimeout(state.staleTimer)
+    state.staleTimer = null
+    state.knownFiles = snapshotFiles()
+  }
 
+  function notifyExit(sessionId, exitCode) {
+    const state = sessionStates.get(sessionId)
+    if (!state) return
     const derived = exitCode === 0
       ? { state: 'done', summary: 'Session complete' }
       : { state: 'error', summary: `Exit code ${exitCode}` }
-
     sendToRenderer('jsonl:state', sessionId, derived)
   }
 
-  /**
-   * Called by ptyManager when a permission prompt is detected in the terminal.
-   * Immediately transitions to needs-input without waiting for the stale timer.
-   */
-  /**
-   * Called by ptyManager when a thinking spinner is detected in the terminal.
-   * Overrides idle/stale state to working.
-   */
   function notifyThinking(sessionId) {
-    const entry = watchers.get(sessionId)
-    if (!entry) return
+    const state = sessionStates.get(sessionId)
+    if (!state) return
 
-    const { state } = entry
-
-    // Reset the stale timer so it doesn't flip back to idle
     clearTimeout(state.staleTimer)
     state.staleTimer = setTimeout(() => {
       const derived = deriveState(state.events, state.lastWriteTime)
@@ -412,14 +462,12 @@ export function createJsonlWatcher(getWindow) {
   }
 
   function notifyPermissionPrompt(sessionId) {
-    const entry = watchers.get(sessionId)
-    if (!entry) return
+    const state = sessionStates.get(sessionId)
+    if (!state) return
 
-    const { state } = entry
     const events = state.events
     if (events.length === 0) return
 
-    // Only flip if the last JSONL event has a pending tool_use (no tool_result yet)
     const last = events[events.length - 1]
     if (last.type !== 'assistant') return
 
@@ -428,56 +476,52 @@ export function createJsonlWatcher(getWindow) {
     if (toolUses.length === 0) return
 
     const lastTool = toolUses[toolUses.length - 1]
-
-    // Clear the stale timer since we're setting state immediately
     clearTimeout(state.staleTimer)
 
     const derived = { state: 'needs-input', summary: `Waiting for approval: ${lastTool.name}` }
-    console.log(`[jsonlWatcher:${sessionId}] permission prompt detected — ${derived.summary}`)
+    console.log(`[jsonlWatcher:${sessionId}] permission prompt — ${derived.summary}`)
     sendToRenderer('jsonl:state', sessionId, derived)
   }
 
-  /**
-   * Called by ptyManager when the shell prompt returns (Claude exited).
-   * Immediately ends the session regardless of whether a result event was written.
-   */
   function notifyShellReturn(sessionId) {
-    const entry = watchers.get(sessionId)
-    if (!entry) return
+    const state = sessionStates.get(sessionId)
+    if (!state || !state.locked) return
 
-    const { state } = entry
-    if (!state.locked) return
-
-    console.log(`[jsonlWatcher:${sessionId}] shell return detected — ending session`)
+    console.log(`[jsonlWatcher:${sessionId}] shell return — session ended`)
     sendToRenderer('jsonl:state', sessionId, { state: 'done', summary: 'Session ended' })
     sendToRenderer('jsonl:session-ended', sessionId)
-
-    state.locked = false
-    state.events = []
-    clearTimeout(state.staleTimer)
-    state.knownFiles = snapshotFiles()
+    unlockSession(sessionId, state)
   }
 
   function stopWatching(sessionId) {
-    const entry = watchers.get(sessionId)
-    if (!entry) return
-    clearTimeout(entry.state.staleTimer)
-    entry.watcher.close()
-    watchers.delete(sessionId)
+    const state = sessionStates.get(sessionId)
+    if (!state) return
+    clearTimeout(state.staleTimer)
+    if (state.filePath) fileOwners.delete(state.filePath)
+    sessionStates.delete(sessionId)
+
+    // Stop global watcher when no sessions remain
+    if (sessionStates.size === 0 && globalWatcher) {
+      globalWatcher.close()
+      globalWatcher = null
+      fileOwners.clear()
+    }
   }
 
   function stopAll() {
-    for (const [, entry] of watchers) {
-      clearTimeout(entry.state.staleTimer)
-      entry.watcher.close()
+    for (const [, state] of sessionStates) {
+      clearTimeout(state.staleTimer)
     }
-    watchers.clear()
+    sessionStates.clear()
+    fileOwners.clear()
+    if (globalWatcher) {
+      globalWatcher.close()
+      globalWatcher = null
+    }
   }
 
   /**
    * List recent sessions for a project directory.
-   * Reads JSONL files to extract sessionId, last timestamp, and first user prompt.
-   * Returns up to 10 most recent sessions, sorted by last modified.
    */
   function listRecentSessions(cwd) {
     const projectDir = getProjectDir(cwd)
@@ -504,7 +548,6 @@ export function createJsonlWatcher(getWindow) {
         const content = fs.readFileSync(file.filePath, 'utf8')
         const lines = content.trim().split('\n')
 
-        // Find sessionId from first event that has one
         let sessionId = null
         let firstPrompt = ''
         for (const line of lines) {
@@ -513,7 +556,6 @@ export function createJsonlWatcher(getWindow) {
             if (!sessionId && event.sessionId) {
               sessionId = event.sessionId
             }
-            // Grab first user prompt as preview
             if (!firstPrompt && event.type === 'user' && event.message?.content) {
               const content = event.message.content
               if (typeof content === 'string') {

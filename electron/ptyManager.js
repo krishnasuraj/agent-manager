@@ -60,10 +60,22 @@ const PERMISSION_PATTERNS = [
   /Yes.*don't ask again/i,                  // "Yes, and don't ask again" option
 ]
 
-// Patterns that indicate the shell prompt has returned (Claude exited)
-// Matches common prompt endings: $, %, ❯, >, #
-// The prompt typically appears at the start of a line after Claude exits
-const SHELL_PROMPT_PATTERN = /(?:^|\n)\s*(?:.*[$%❯>#])\s*$/
+// Patterns that indicate the shell prompt has returned (Claude exited).
+// Must be tight to avoid matching Claude's own output (code blocks, commands, etc.).
+// We look for common prompt formats that appear on their own line:
+//   user@host path %    (zsh default)
+//   user@host:path$     (bash default)
+//   path ❯              (starship/custom)
+//   [user@host path]$   (bash bracketed)
+// The key insight: a real prompt has a sigil at the END of a line with
+// path-like or user-like content before it — not just a bare sigil.
+const SHELL_PROMPT_PATTERNS = [
+  /\S+@\S+.*[$%#]\s*$/,          // user@host ... $ or % or #
+  /~[/\w]*\s*[$%❯#]\s*$/,        // ~/path $ or % or ❯
+  /\w+[/\w]*\s+[$%❯]\s*$/,       // dirname $ or % or ❯  (at least one word before sigil)
+  /^\s*\$\s*$/m,                  // bare $ on its own line (very common default)
+  /^\s*%\s*$/m,                   // bare % on its own line (zsh default with no config)
+]
 
 // How much PTY output to keep in the rolling buffer (bytes)
 const PTY_BUFFER_SIZE = 4096
@@ -132,16 +144,29 @@ export function createPtyManager(getWindow) {
       }
     }
 
-    // Detect shell prompt returning (Claude exited)
-    if (session.claudeRunning && SHELL_PROMPT_PATTERN.test(recent)) {
-      if (now - session.lastShellReturnFired < 3000) return
-      session.lastShellReturnFired = now
-      session.claudeRunning = false
-      session.outputBuffer = ''
-      console.log(`[ptyManager:${sessionId}] shell prompt returned — Claude exited`)
-      if (session.shellReturnCallback) {
-        session.shellReturnCallback(sessionId)
+    // Detect shell prompt returning (Claude exited).
+    // Require TWO consecutive matches 500ms apart to avoid false positives from
+    // Claude printing code/commands that happen to look like prompts.
+    const promptMatch = SHELL_PROMPT_PATTERNS.some((p) => p.test(recent))
+    if (session.claudeRunning && promptMatch) {
+      if (!session.pendingShellReturn) {
+        // First match — record it but don't fire yet
+        session.pendingShellReturn = now
+      } else if (now - session.pendingShellReturn > 500) {
+        // Second match 500ms+ later — real prompt, fire
+        if (now - session.lastShellReturnFired < 3000) return
+        session.lastShellReturnFired = now
+        session.claudeRunning = false
+        session.pendingShellReturn = null
+        session.outputBuffer = ''
+        console.log(`[ptyManager:${sessionId}] shell prompt returned — Claude exited`)
+        if (session.shellReturnCallback) {
+          session.shellReturnCallback(sessionId)
+        }
       }
+    } else {
+      // Non-prompt output resets the pending match
+      session.pendingShellReturn = null
     }
 
   }
@@ -181,6 +206,7 @@ export function createPtyManager(getWindow) {
       lastPermissionFired: 0,
       lastThinkingFired: 0,
       lastShellReturnFired: 0,
+      pendingShellReturn: null,
       claudeRunning: false,
       permissionCallback: null,
       thinkingCallback: null,
