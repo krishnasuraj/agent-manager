@@ -54,10 +54,12 @@ function stripAnsi(str) {
 // These appear in the terminal when Claude wants to run a tool and needs user consent.
 const PERMISSION_PATTERNS = [
   /Allow\s+Deny/i,                         // "Allow  Deny" buttons side by side
-  /❯\s*(Allow|Yes)/,                        // Arrow selection on Allow/Yes
+  /[❯›]\s*(Allow|Yes)/,                    // Arrow selection on Allow/Yes
   /Allow once/i,
   /Allow always/i,
-  /Yes.*don't ask again/i,                  // "Yes, and don't ask again" option
+  /Yes.*don['\u2019]t ask again/i,         // "Yes, and don't ask again" option (straight or curly apostrophe)
+  /Do you want to allow Claude to/i,       // Fetch/MCP permission question
+  /\d+\.\s*Yes[,\s]/,                      // Numbered option list with "Yes" (fetch prompts)
 ]
 
 // Patterns that indicate the shell prompt has returned (Claude exited).
@@ -121,17 +123,9 @@ export function createPtyManager(getWindow) {
       return
     }
 
-    // Check for thinking spinners — all use "* Word..." or "* Word…" format
-    if (/\*\s+[A-Z][a-z]+[.…]/.test(recent)) {
-      if (now - session.lastThinkingFired < 3000) return
-      session.lastThinkingFired = now
-      if (session.thinkingCallback) {
-        session.thinkingCallback(sessionId)
-      }
-      return
-    }
-
-    // Check for permission prompts
+    // Check for permission prompts FIRST — must take priority over thinking
+    // spinners, because stale thinking text in the buffer could mask a permission
+    // prompt that appeared after it.
     for (const pattern of PERMISSION_PATTERNS) {
       if (pattern.test(recent)) {
         if (now - session.lastPermissionFired < 2000) return
@@ -143,6 +137,16 @@ export function createPtyManager(getWindow) {
         }
         return
       }
+    }
+
+    // Check for thinking spinners — all use "* Word..." or "* Word…" format
+    if (/\*\s+[A-Z][a-z]+[.…]/.test(recent)) {
+      if (now - session.lastThinkingFired < 3000) return
+      session.lastThinkingFired = now
+      if (session.thinkingCallback) {
+        session.thinkingCallback(sessionId)
+      }
+      return
     }
 
     // Detect shell prompt returning (Claude exited).
