@@ -34,6 +34,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('menu:new-agent', handler)
     return () => ipcRenderer.removeListener('menu:new-agent', handler)
   },
+  onMenuView: (cb) => {
+    const handler = (_e, view) => cb(view)
+    ipcRenderer.on('menu:view', handler)
+    return () => ipcRenderer.removeListener('menu:view', handler)
+  },
 
   // Worktree (parameterized by workspace)
   worktreeCreate: (workspace, branch) => ipcRenderer.invoke('worktree:create', workspace, branch),

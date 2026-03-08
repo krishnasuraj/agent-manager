@@ -210,6 +210,21 @@ function buildMenu() {
     {
       label: 'View',
       submenu: [
+        {
+          label: 'Board View',
+          accelerator: 'CmdOrCtrl+1',
+          click: () => {
+            getActiveWindow()?.webContents.send('menu:view', 'board')
+          },
+        },
+        {
+          label: 'Agent View',
+          accelerator: 'CmdOrCtrl+2',
+          click: () => {
+            getActiveWindow()?.webContents.send('menu:view', 'agent')
+          },
+        },
+        { type: 'separator' },
         { role: 'reload' },
         { role: 'forceReload' },
         { role: 'toggleDevTools' },

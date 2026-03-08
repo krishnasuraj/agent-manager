@@ -88,14 +88,15 @@ export default function App() {
   // Keep workspacesRef in sync
   useEffect(() => { workspacesRef.current = workspaces }, [workspaces])
 
-  // Listen for menu events (Cmd+N from native menu)
+  // Listen for menu events (Cmd+N from native menu, Cmd+1/2 for view switching)
   useEffect(() => {
-    const remove = window.electronAPI.onMenuNewAgent(() => {
+    const removeNewAgent = window.electronAPI.onMenuNewAgent(() => {
       if (workspacesRef.current.length > 0) {
         setShowNewAgent(true)
       }
     })
-    return () => remove()
+    const removeView = window.electronAPI.onMenuView((v) => setView(v))
+    return () => { removeNewAgent(); removeView() }
   }, [])
 
   // Global IPC listeners
@@ -292,13 +293,13 @@ export default function App() {
                 onClick={() => setView('board')}
                 className={`text-[11px] px-2.5 py-1 transition-colors ${view === 'board' ? 'bg-surface-2 text-text-primary' : 'text-text-muted hover:text-text-secondary'}`}
               >
-                Board
+                Board <span className="text-text-muted ml-1 opacity-60">⌘1</span>
               </button>
               <button
                 onClick={() => setView('agent')}
                 className={`text-[11px] px-2.5 py-1 transition-colors ${view === 'agent' ? 'bg-surface-2 text-text-primary' : 'text-text-muted hover:text-text-secondary'}`}
               >
-                Agent
+                Agent <span className="text-text-muted ml-1 opacity-60">⌘2</span>
               </button>
             </div>
           )}
@@ -309,7 +310,7 @@ export default function App() {
               onClick={openNewAgentModal}
               className="text-xs text-text-muted hover:text-text-primary border border-border hover:border-border-bright rounded px-2 py-1 transition-colors"
             >
-              + New Agent
+              + New Agent <span className="text-text-muted ml-1 opacity-60">⌘N</span>
             </button>
           </div>
         )}
