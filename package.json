@@ -1,7 +1,10 @@
 {
-  "name": "agent-orchestrator",
+  "name": "agent-manager",
+  "productName": "Agent Manager",
+  "description": "Desktop app for managing multiple Claude Code agents in parallel",
+  "author": "Krishna Suraj",
   "private": true,
-  "version": "0.0.0",
+  "version": "0.1.0",
   "type": "module",
   "main": "out/main/main.js",
   "scripts": {
@@ -9,21 +12,73 @@
     "dev:test": "electron-vite dev -- --test-sessions=3",
     "build": "electron-vite build",
     "preview": "electron-vite preview",
-    "rebuild": "CXXFLAGS=\"-I$(xcrun --show-sdk-path)/usr/include/c++/v1 -isysroot $(xcrun --show-sdk-path)\" electron-rebuild -f -w node-pty"
+    "rebuild": "CXXFLAGS=\"-I$(xcrun --show-sdk-path)/usr/include/c++/v1 -isysroot $(xcrun --show-sdk-path)\" electron-rebuild -f -w node-pty",
+    "dist": "electron-vite build && CXXFLAGS=\"-I$(xcrun --show-sdk-path)/usr/include/c++/v1 -isysroot $(xcrun --show-sdk-path)\" electron-builder --mac",
+    "dist:all": "electron-vite build && CXXFLAGS=\"-I$(xcrun --show-sdk-path)/usr/include/c++/v1 -isysroot $(xcrun --show-sdk-path)\" electron-builder --mac --win --linux"
+  },
+  "build": {
+    "appId": "com.krishnasuraj.agent-manager",
+    "productName": "Agent Manager",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "out/**/*",
+      "node_modules/**/*",
+      "!node_modules/**/build/Release/.deps",
+      "!node_modules/**/build/Release/obj.target"
+    ],
+    "mac": {
+      "icon": "build/icon.icns",
+      "category": "public.app-category.developer-tools",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": ["arm64", "x64"]
+        }
+      ],
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false
+    },
+    "dmg": {
+      "title": "Agent Manager",
+      "contents": [
+        { "x": 130, "y": 220 },
+        { "x": 410, "y": 220, "type": "link", "path": "/Applications" }
+      ]
+    },
+    "win": {
+      "icon": "build/icon.png",
+      "target": ["nsis"]
+    },
+    "linux": {
+      "icon": "build/icon.png",
+      "target": ["AppImage"],
+      "category": "Development"
+    },
+    "publish": {
+      "provider": "github",
+      "owner": "krishnasuraj",
+      "repo": "agent-manager"
+    },
+    "nodeGypRebuild": false,
+    "npmRebuild": true
   },
   "dependencies": {
+    "electron-updater": "^6.8.3",
     "node-pty": "^1.0.0"
   },
   "devDependencies": {
+    "@electron/rebuild": "^4.0.0",
     "@tailwindcss/vite": "^4.2.1",
     "@vitejs/plugin-react": "^5.1.4",
     "@xterm/addon-fit": "^0.10.0",
-    "@xterm/addon-web-links": "^0.11.0",
     "@xterm/addon-serialize": "^0.13.0",
+    "@xterm/addon-web-links": "^0.11.0",
     "@xterm/xterm": "^5.5.0",
     "chokidar": "^4.0.3",
     "electron": "^33.4.11",
-    "@electron/rebuild": "^4.0.0",
+    "electron-builder": "^26.8.1",
     "electron-vite": "^5.0.0",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",

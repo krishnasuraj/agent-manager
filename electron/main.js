@@ -1,6 +1,7 @@
 import { app, BrowserWindow, ipcMain, dialog, Menu } from 'electron'
 import path from 'path'
 import fs from 'fs'
+import { autoUpdater } from 'electron-updater'
 import { createPtyManager } from './ptyManager.js'
 import { createJsonlWatcher } from './jsonlWatcher.js'
 import { worktreeCreate, worktreeRemove, worktreeIsDirty } from './worktreeManager.js'
@@ -261,9 +262,46 @@ function createWindow() {
   })
 }
 
+// ─── Auto-update ──────────────────────────────────────────────────
+
+autoUpdater.autoDownload = true
+autoUpdater.autoInstallOnAppQuit = true
+
+autoUpdater.on('update-available', (info) => {
+  console.log('Update available:', info.version)
+})
+
+autoUpdater.on('update-downloaded', (info) => {
+  const win = mainWindow || BrowserWindow.getAllWindows()[0]
+  if (!win) return
+  dialog
+    .showMessageBox(win, {
+      type: 'info',
+      title: 'Update Ready',
+      message: `Version ${info.version} has been downloaded.`,
+      detail: 'Restart the app to apply the update.',
+      buttons: ['Restart Now', 'Later'],
+      defaultId: 0,
+    })
+    .then(({ response }) => {
+      if (response === 0) {
+        autoUpdater.quitAndInstall()
+      }
+    })
+})
+
+autoUpdater.on('error', (err) => {
+  console.error('Auto-update error:', err)
+})
+
 app.whenReady().then(() => {
   buildMenu()
   createWindow()
+
+  // Check for updates (skip in dev)
+  if (!process.env.ELECTRON_RENDERER_URL) {
+    autoUpdater.checkForUpdates().catch(() => {})
+  }
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {

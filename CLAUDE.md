@@ -2,7 +2,7 @@
 
 ## Vision
 
-A desktop app for managing multiple Claude Code agents working in parallel across git worktrees. The key insight: **don't fight the terminal, and don't reinvent state detection**. Claude Code already writes structured JSONL session logs to disk. We watch those for state instead of parsing terminal output or running headless agents.
+A desktop app for managing multiple Claude Code agents working in parallel across workspaces and git worktrees. The key insight: **don't fight the terminal, and don't reinvent state detection**. Claude Code already writes structured JSONL session logs to disk. We watch those for state instead of parsing terminal output or running headless agents.
 
 The architecture is: **real terminal (xterm.js + node-pty) for UX** + **JSONL session file watcher for state** + **a sidebar that surfaces what needs your attention**.
 
@@ -142,6 +142,8 @@ Tool names: `Read`, `Write`, `Bash`, `Task`, `WebSearch`.
 | `jsonl:event` | `(sessionId, { timestamp, icon, label, detail })` — log entry |
 | `jsonl:session-started` | `(sessionId)` — Claude session detected |
 | `jsonl:session-ended` | `(sessionId)` — Claude session ended |
+| `workspaces:changed` | `([{ path, name, isGit }])` — workspace list updated |
+| `menu:new-agent` | `()` — File > New Agent clicked |
 
 **Renderer → Main (fire-and-forget):**
 | Channel | Payload |
@@ -155,10 +157,14 @@ Tool names: `Read`, `Write`, `Bash`, `Task`, `WebSearch`.
 | `session:spawn` | `(sessionId, { cwd?, initialPrompt? })` |
 | `session:kill` | `(sessionId)` |
 | `session:getCwd` | `(sessionId)` |
-| `worktree:create` | `(branch)` → `{ branch, worktreePath, existing }` |
-| `worktree:isDirty` | `(branch)` → `{ dirty }` |
-| `worktree:remove` | `(branch, force?)` |
+| `worktree:create` | `(workspace, branch)` → `{ branch, worktreePath, existing }` |
+| `worktree:isDirty` | `(workspace, branch)` → `{ dirty }` |
+| `worktree:remove` | `(workspace, branch, force?)` |
+| `workspace:list` | `()` → `[{ path, name, isGit }]` |
+| `workspace:add-via-dialog` | `()` → `{ path, name, isGit }` or `null` |
+| `dialog:pick-folder` | `()` → `string` or `null` |
 | `app:getTestConfig` | `()` → `{ testSessions, testCwds, testBranches }` |
+| `app:getCwd` | `()` → `string` |
 
 ---
 
@@ -166,11 +172,11 @@ Tool names: `Read`, `Write`, `Bash`, `Task`, `WebSearch`.
 
 ```
 electron/
-  main.js               — Electron entry, window creation, IPC wiring, env scrubbing
+  main.js               — Electron entry, window creation, IPC wiring, env scrubbing, workspace management, native menu
   preload.js            — contextBridge exposing electronAPI
   ptyManager.js         — PTY lifecycle + output scanning (thinking, permissions, shell return)
   jsonlWatcher.js       — Global JSONL watching, state derivation, session lifecycle
-  worktreeManager.js    — Git worktree create/remove/isDirty/list
+  worktreeManager.js    — Git worktree operations as plain functions (repoRoot per call)
 src/
   components/
     TerminalPanel.jsx   — xterm.js terminal with FitAddon + WebLinksAddon
@@ -178,7 +184,7 @@ src/
     SessionList.jsx     — Sidebar: session list with state dots + close button
     KanbanBoard.jsx     — Board view: 3-column kanban (Idle/Working/Needs Input)
     ResizableSplit.jsx  — Draggable split layout
-  App.jsx               — Multi-session orchestration, new agent modal, close modal
+  App.jsx               — Multi-session orchestration, workspace management, new agent modal, close modal
   main.jsx
   index.css             — Tailwind imports + theme tokens + xterm styles
 ```
@@ -261,17 +267,21 @@ Single window: sidebar (30%) + terminal (70%). Auto-spawns a login shell. User s
 
 ---
 
-### Stage 4: Orchestration Layer (in progress)
+### Stage 4: Orchestration Layer ✅ Complete
 
 **Goal:** The app actively helps manage agents, not just display them.
 
-**What to build:**
+**What we built:**
 
-- **Kanban board view.** Three columns: Idle, Working, Needs Input. Cards show branch name + last event. Click to expand with status detail + "Work with agent" button that switches to Agent view. ✅
-- **View toggle.** Agent/Board toggle in title bar. Both views stay mounted (terminals don't lose state). ✅
-- **Desktop notifications.** Fire when a session transitions to "Needs Input" or "Error." (deferred)
-- **Cross-session file conflict detection.** Watch `git status` across worktrees, surface a warning if two agents are editing the same file. (deferred)
-- **CI integration (stretch).** Poll GitHub Actions for each branch. Show CI status alongside session state. (deferred)
+- **Kanban board view.** Three columns: Idle, Working, Needs Input. Cards show branch name + last event. Click to expand with status detail + "Work with agent" button that switches to Agent view. Board is the default view.
+- **View toggle.** Board/Agent toggle in title bar. Both views stay mounted (terminals don't lose state). Creating a new agent auto-switches to Agent view.
+- **Multi-workspace support.** Workspaces (git repos or plain directories) are managed in the main process. Workspace selector in New Agent modal with "+ Add workspace" option. Non-git directories supported with a warning (no worktree isolation). Welcome screen when no workspaces configured.
+- **Native Electron menu.** File > New Agent (Cmd+N), File > Add Workspace (Cmd+Shift+O). Standard Edit/View/Window menus for copy/paste/devtools.
+- **worktreeManager refactored** from factory pattern to plain exported functions. Each function takes `repoRoot` as first arg, enabling multi-workspace worktree operations.
+- **Session model** now carries `workspace` field for worktree operations on close.
+- **Desktop notifications.** (deferred)
+- **Cross-session file conflict detection.** (deferred)
+- **CI integration (stretch).** (deferred)
 
 ---
 
@@ -434,3 +444,32 @@ Single window: login shell spawned automatically, user types `claude`. JSONL wat
 | `git worktree add` fails on existing branch | No check for existing worktree | `fs.existsSync` check, return `{ existing: true }` |
 | Worktree not deleted on close | PTY process holds directory as cwd | 500ms delay between `killSession` and `worktreeRemove` |
 | macOS title bar overlaps traffic lights | `hiddenInset` title bar style needs left padding | `pl-16` on title element |
+
+---
+
+## Stage 4 Implementation Log
+
+### Key Decisions
+
+1. **Workspaces are metadata, not architectural boundaries.** A workspace is just `{ path, name, isGit }`. The single window shows all agents across all workspaces. Worktree operations are parameterized by workspace path. No per-workspace managers or separate windows.
+
+2. **worktreeManager as plain functions, not a factory.** The factory pattern (`createWorktreeManager(repoRoot)`) bound operations to a single repo. With multi-workspace, each call needs a different repo root. Refactored to exported functions: `worktreeCreate(repoRoot, branch)`, `worktreeRemove(repoRoot, branch)`, etc. No cached state — stateless is simpler.
+
+3. **Non-git directories allowed as workspaces.** The initial implementation rejected non-git directories with `dialog.showErrorBox`. This was too restrictive — users may want to run Claude in any directory. Fix: accept any directory, tag with `isGit: boolean`. The New Agent modal adapts: git repos get branch name + worktree creation, non-git dirs get a warning and launch directly.
+
+4. **Native Electron menu for keyboard shortcuts.** Cmd+N was initially handled via a `keydown` listener in the renderer. Moved to native menu accelerator for proper macOS feel. Also added Cmd+Shift+O for Add Workspace. Menu sends IPC events (`menu:new-agent`) to the renderer.
+
+5. **Board view as default.** The kanban board gives the best overview when managing multiple agents. Agent view is for focused interaction. Creating a new agent auto-switches to Agent view so you can see the terminal immediately.
+
+6. **Welcome screen within main layout, not early return.** First implementation used an early `return` for the welcome screen (no workspaces). This caused the New Agent modal to render on top of a bare screen with no title bar. Fix: render welcome content inside the main layout so the title bar is always present.
+
+7. **Terminal preview in kanban cards is fundamentally impossible.** Attempted 6+ approaches: ANSI stripping (garbled — terminal bytes aren't text), raw xterm replay at narrow width (wraps wrong — PTY output designed for specific column count), CSS transform scaling (terminal still renders at container width), SerializeAddon (same column-width problem). Root cause: PTY output contains cursor movements and overwrites designed for a specific terminal width. You cannot display it at a different width without re-rendering through the original-width terminal. Abandoned.
+
+### Bugs Encountered
+
+| Bug | Root Cause | Fix |
+|-----|-----------|-----|
+| No title bar behind New Agent modal on first launch | Welcome screen used early `return`, modal rendered on bare screen | Render welcome as content within main layout, not a separate return |
+| Can't select workspace in New Agent modal | Single-workspace case showed static label, no way to change | Always show dropdown with "+ Add workspace" option |
+| "Not a Git Repository" error blocks adding non-git workspaces | `addWorkspaceViaDialog` rejected non-git dirs with `showErrorBox` | Allow any directory, tag with `isGit` flag, show warning in modal |
+| `openNewAgentModal()` infinite recursion | `replace_all` on `setShowNewAgent(true)` → `openNewAgentModal()` also replaced the one inside the function body | Manual fix: ensure function body calls `setShowNewAgent(true)` not itself |

@@ -14,7 +14,7 @@ export default defineConfig({
         entry: resolve(__dirname, 'electron/main.js'),
       },
       rollupOptions: {
-        external: ['node-pty'],
+        external: ['node-pty', 'electron-updater'],
       },
     },
   },
