@@ -1,9 +1,9 @@
-import { app, BrowserWindow, ipcMain, dialog } from 'electron'
+import { app, BrowserWindow, ipcMain, dialog, Menu } from 'electron'
 import path from 'path'
 import fs from 'fs'
 import { createPtyManager } from './ptyManager.js'
 import { createJsonlWatcher } from './jsonlWatcher.js'
-import { createWorktreeManager } from './worktreeManager.js'
+import { worktreeCreate, worktreeRemove, worktreeIsDirty } from './worktreeManager.js'
 
 // Scrub Claude env vars so child processes don't inherit nesting detection
 for (const key of Object.keys(process.env)) {
@@ -24,7 +24,33 @@ function getWindow() {
 
 const ptyManager = createPtyManager(getWindow)
 const jsonlWatcher = createJsonlWatcher(getWindow)
-const worktreeManager = createWorktreeManager(process.cwd())
+
+// ─── Workspace management ─────────────────────────────────────────
+
+const workspaces = [] // [{ path: string, name: string }]
+
+function isGitRepo(dir) {
+  try {
+    return fs.existsSync(path.join(dir, '.git'))
+  } catch {
+    return false
+  }
+}
+
+function addWorkspace(dirPath) {
+  const resolved = path.resolve(dirPath)
+  const existing = workspaces.find((w) => w.path === resolved)
+  if (existing) return existing
+  const ws = { path: resolved, name: path.basename(resolved), isGit: isGitRepo(resolved) }
+  workspaces.push(ws)
+  mainWindow?.webContents.send('workspaces:changed', workspaces)
+  return ws
+}
+
+// Auto-add cwd as workspace if it's a git repo
+if (isGitRepo(process.cwd())) {
+  addWorkspace(process.cwd())
+}
 
 // ─── IPC handlers (registered once, outside createWindow) ───────────
 
@@ -39,31 +65,42 @@ ipcMain.on('pty:resize', (_, sessionId, cols, rows) => {
 
 ipcMain.handle('app:getCwd', () => process.cwd())
 
+// Workspaces
+ipcMain.handle('workspace:list', () => workspaces)
+
+ipcMain.handle('workspace:add-via-dialog', async () => {
+  const win = mainWindow || BrowserWindow.getAllWindows()[0]
+  if (!win) return null
+  const result = await dialog.showOpenDialog(win, { properties: ['openDirectory'] })
+  if (result.canceled || result.filePaths.length === 0) return null
+  return addWorkspace(result.filePaths[0])
+})
+
 // Test config
 ipcMain.handle('app:getTestConfig', () => {
   const testCwds = []
   const testBranches = []
   for (let i = 0; i < testSessionCount; i++) {
     const branch = `test-${i + 1}`
-    const { worktreePath } = worktreeManager.create(branch)
+    const { worktreePath } = worktreeCreate(process.cwd(), branch)
     testCwds.push(worktreePath)
     testBranches.push(branch)
   }
   return { testSessions: testSessionCount, testCwds, testBranches }
 })
 
-// Worktree operations
-ipcMain.handle('worktree:create', (_, branch) => {
-  const { worktreePath, existing } = worktreeManager.create(branch)
+// Worktree operations — parameterized by workspace path
+ipcMain.handle('worktree:create', (_, workspace, branch) => {
+  const { worktreePath, existing } = worktreeCreate(workspace, branch)
   return { branch, worktreePath, existing }
 })
 
-ipcMain.handle('worktree:isDirty', (_, branch) => {
-  return { dirty: worktreeManager.isDirty(branch) }
+ipcMain.handle('worktree:isDirty', (_, workspace, branch) => {
+  return { dirty: worktreeIsDirty(workspace, branch) }
 })
 
-ipcMain.handle('worktree:remove', (_, branch, force) => {
-  worktreeManager.remove(branch, { force })
+ipcMain.handle('worktree:remove', (_, workspace, branch, force) => {
+  worktreeRemove(workspace, branch, { force })
   return { ok: true }
 })
 
@@ -109,6 +146,92 @@ ipcMain.handle('session:spawn', (_, sessionId, opts) => {
   return { sessionId, cwd }
 })
 
+// ─── Menu ─────────────────────────────────────────────────────────
+
+function buildMenu() {
+  const template = [
+    ...(process.platform === 'darwin'
+      ? [
+          {
+            label: app.name,
+            submenu: [
+              { role: 'about' },
+              { type: 'separator' },
+              { role: 'hide' },
+              { role: 'hideOthers' },
+              { role: 'unhide' },
+              { type: 'separator' },
+              { role: 'quit' },
+            ],
+          },
+        ]
+      : []),
+    {
+      label: 'File',
+      submenu: [
+        {
+          label: 'New Agent',
+          accelerator: 'CmdOrCtrl+N',
+          click: () => {
+            mainWindow?.webContents.send('menu:new-agent')
+          },
+        },
+        { type: 'separator' },
+        {
+          label: 'Add Workspace…',
+          accelerator: 'CmdOrCtrl+Shift+O',
+          click: async () => {
+            const win = mainWindow || BrowserWindow.getAllWindows()[0]
+            if (!win) return
+            const result = await dialog.showOpenDialog(win, { properties: ['openDirectory'] })
+            if (result.canceled || result.filePaths.length === 0) return
+            addWorkspace(result.filePaths[0])
+          },
+        },
+        { type: 'separator' },
+        { role: 'close' },
+      ],
+    },
+    {
+      label: 'Edit',
+      submenu: [
+        { role: 'undo' },
+        { role: 'redo' },
+        { type: 'separator' },
+        { role: 'cut' },
+        { role: 'copy' },
+        { role: 'paste' },
+        { role: 'selectAll' },
+      ],
+    },
+    {
+      label: 'View',
+      submenu: [
+        { role: 'reload' },
+        { role: 'forceReload' },
+        { role: 'toggleDevTools' },
+        { type: 'separator' },
+        { role: 'resetZoom' },
+        { role: 'zoomIn' },
+        { role: 'zoomOut' },
+        { type: 'separator' },
+        { role: 'togglefullscreen' },
+      ],
+    },
+    {
+      label: 'Window',
+      submenu: [
+        { role: 'minimize' },
+        { role: 'zoom' },
+        ...(process.platform === 'darwin'
+          ? [{ type: 'separator' }, { role: 'front' }]
+          : []),
+      ],
+    },
+  ]
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template))
+}
+
 // ─── Window ─────────────────────────────────────────────────────────
 
 function createWindow() {
@@ -139,6 +262,7 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
+  buildMenu()
   createWindow()
 
   app.on('activate', () => {

@@ -13,7 +13,7 @@ function getColumnKey(session) {
   return 'idle'
 }
 
-export default function KanbanBoard({ sessions, onSelectAgent, onClose, onNewAgent }) {
+export default function KanbanBoard({ sessions, onSelectAgent, onClose, onNewAgent, showWorkspace }) {
   const [collapsedIds, setCollapsedIds] = useState(new Set())
 
   const grouped = { idle: [], working: [], 'needs-input': [] }
@@ -66,6 +66,11 @@ export default function KanbanBoard({ sessions, onSelectAgent, onClose, onNewAge
                         </button>
                       )}
                     </div>
+                    {showWorkspace && session.workspace && (
+                      <p className="text-[10px] text-text-muted truncate">
+                        {session.workspace.split('/').pop()}
+                      </p>
+                    )}
                     {session.lastEvent && (
                       <p className="text-[11px] font-mono text-text-muted truncate mt-1">
                         {session.lastEvent}

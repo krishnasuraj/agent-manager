@@ -19,17 +19,32 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getTestConfig: () => ipcRenderer.invoke('app:getTestConfig'),
   getAppCwd: () => ipcRenderer.invoke('app:getCwd'),
 
-  // Worktree
-  worktreeCreate: (branch) => ipcRenderer.invoke('worktree:create', branch),
-  worktreeIsDirty: (branch) => ipcRenderer.invoke('worktree:isDirty', branch),
-  worktreeRemove: (branch, force) => ipcRenderer.invoke('worktree:remove', branch, force),
+  // Workspaces
+  getWorkspaces: () => ipcRenderer.invoke('workspace:list'),
+  addWorkspaceViaDialog: () => ipcRenderer.invoke('workspace:add-via-dialog'),
+  onWorkspacesChanged: (cb) => {
+    const handler = (_, workspaces) => cb(workspaces)
+    ipcRenderer.on('workspaces:changed', handler)
+    return () => ipcRenderer.removeListener('workspaces:changed', handler)
+  },
+
+  // Menu events
+  onMenuNewAgent: (cb) => {
+    const handler = () => cb()
+    ipcRenderer.on('menu:new-agent', handler)
+    return () => ipcRenderer.removeListener('menu:new-agent', handler)
+  },
+
+  // Worktree (parameterized by workspace)
+  worktreeCreate: (workspace, branch) => ipcRenderer.invoke('worktree:create', workspace, branch),
+  worktreeIsDirty: (workspace, branch) => ipcRenderer.invoke('worktree:isDirty', workspace, branch),
+  worktreeRemove: (workspace, branch, force) => ipcRenderer.invoke('worktree:remove', workspace, branch, force),
 
   // Session lifecycle
   spawnSession: (sessionId, opts) => ipcRenderer.invoke('session:spawn', sessionId, opts),
   killSession: (sessionId) => ipcRenderer.invoke('session:kill', sessionId),
   getSessionCwd: (sessionId) => ipcRenderer.invoke('session:getCwd', sessionId),
   pickFolder: () => ipcRenderer.invoke('dialog:pick-folder'),
-  listRecentSessions: (cwd) => ipcRenderer.invoke('sessions:list-recent', cwd),
 
   // JSONL state
   onJsonlEvent: (cb) => {

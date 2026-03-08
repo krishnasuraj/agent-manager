@@ -9,16 +9,19 @@ export default function App() {
   const [sessions, setSessions] = useState([])
   const [activeSessionId, setActiveSessionId] = useState(null)
   const [showNewAgent, setShowNewAgent] = useState(false)
-  const [view, setView] = useState('agent') // 'agent' | 'board'
+  const [view, setView] = useState('board') // 'board' | 'agent'
   const [branchInput, setBranchInput] = useState('')
+  const [workspaces, setWorkspaces] = useState([])
+  const [selectedWorkspace, setSelectedWorkspace] = useState(null)
   const spawned = useRef(false)
 
-  const spawnAgent = useCallback(async (branch, cwd) => {
+  const spawnAgent = useCallback(async (branch, workspace, cwd) => {
     const id = `session-${Date.now()}`
     setSessions(prev => [...prev, {
-      id, name: branch, branch, claudeActive: false, state: null, lastEvent: null,
+      id, name: branch, branch, workspace, claudeActive: false, state: null, lastEvent: null,
     }])
     setActiveSessionId(id)
+    setView('agent')
     try {
       await window.electronAPI.spawnSession(id, { cwd })
     } catch (err) {
@@ -26,10 +29,17 @@ export default function App() {
     }
   }, [])
 
-  // Auto-spawn on mount (test mode or single default session)
+  // Fetch workspaces and auto-spawn on mount
   useEffect(() => {
     if (spawned.current) return
     spawned.current = true
+
+    window.electronAPI.getWorkspaces().then(ws => {
+      setWorkspaces(ws)
+      if (ws.length > 0) {
+        setSelectedWorkspace(ws[0].path)
+      }
+    })
 
     const TEST_PROMPTS = [
       'write a haiku about the ocean and save it to haiku.txt',
@@ -47,30 +57,42 @@ export default function App() {
             const id = `session-${Date.now()}`
             const branch = testBranches[i]
             setSessions(prev => [...prev, {
-              id, name: branch, branch, claudeActive: false, state: null, lastEvent: null,
+              id, name: branch, branch, workspace: null, claudeActive: false, state: null, lastEvent: null,
             }])
             setActiveSessionId(id)
             window.electronAPI.spawnSession(id, { cwd: testCwds[i], initialPrompt: prompt })
           }, i * 2000)
         }
       } else {
-        // No auto-spawn — show the new agent modal
-        setShowNewAgent(true)
+        // Show new agent modal if workspaces exist
+        window.electronAPI.getWorkspaces().then(ws => {
+          if (ws.length > 0) setShowNewAgent(true)
+        })
       }
     })
   }, [])
 
-  // Cmd+N to open new agent modal
+  // Listen for workspace changes from main process
   useEffect(() => {
-    const handler = (e) => {
-      if (e.metaKey && e.key === 'n') {
-        e.preventDefault()
+    const remove = window.electronAPI.onWorkspacesChanged((ws) => {
+      setWorkspaces(ws)
+      setSelectedWorkspace(prev => {
+        if (prev && ws.some(w => w.path === prev)) return prev
+        return ws.length > 0 ? ws[0].path : null
+      })
+    })
+    return () => remove()
+  }, [])
+
+  // Listen for menu events (Cmd+N from native menu)
+  useEffect(() => {
+    const remove = window.electronAPI.onMenuNewAgent(() => {
+      if (workspaces.length > 0) {
         setShowNewAgent(true)
       }
-    }
-    window.addEventListener('keydown', handler)
-    return () => window.removeEventListener('keydown', handler)
-  }, [])
+    })
+    return () => remove()
+  }, [workspaces])
 
   // Global IPC listeners
   useEffect(() => {
@@ -94,23 +116,55 @@ export default function App() {
     }
   }, [])
 
+  const openNewAgentModal = () => {
+    if (workspaces.length === 0) return
+    if (!selectedWorkspace && workspaces.length > 0) {
+      setSelectedWorkspace(workspaces[0].path)
+    }
+    setShowNewAgent(true)
+  }
+
+  const selectedWs = workspaces.find(w => w.path === selectedWorkspace)
+
   const handleNewAgent = async () => {
     const branch = branchInput.trim()
-    if (!branch) return
-    if (!/^[\w][\w./-]*$/.test(branch)) {
-      alert('Invalid branch name. Use letters, numbers, hyphens, dots, or slashes.')
-      return
+    if (!selectedWorkspace) return
+
+    if (selectedWs?.isGit) {
+      if (!branch) return
+      if (!/^[\w][\w./-]*$/.test(branch)) {
+        alert('Invalid branch name. Use letters, numbers, hyphens, dots, or slashes.')
+        return
+      }
+
+      setShowNewAgent(false)
+      setBranchInput('')
+
+      try {
+        const { worktreePath } = await window.electronAPI.worktreeCreate(selectedWorkspace, branch)
+        await spawnAgent(branch, selectedWorkspace, worktreePath)
+      } catch (err) {
+        console.error('Failed to create agent:', err)
+        alert(`Failed to create agent: ${err.message}`)
+      }
+    } else {
+      // Non-git workspace — spawn directly
+      const name = branch || selectedWs?.name || 'agent'
+      setShowNewAgent(false)
+      setBranchInput('')
+      await spawnAgent(name, selectedWorkspace, selectedWorkspace)
     }
+  }
 
-    setShowNewAgent(false)
-    setBranchInput('')
-
-    try {
-      const { worktreePath } = await window.electronAPI.worktreeCreate(branch)
-      await spawnAgent(branch, worktreePath)
-    } catch (err) {
-      console.error('Failed to create agent:', err)
-      alert(`Failed to create agent: ${err.message}`)
+  const handleAddWorkspace = async () => {
+    const ws = await window.electronAPI.addWorkspaceViaDialog()
+    if (ws) {
+      setWorkspaces(prev => {
+        if (prev.some(w => w.path === ws.path)) return prev
+        return [...prev, ws]
+      })
+      setSelectedWorkspace(ws.path)
+      setShowNewAgent(true)
     }
   }
 
@@ -125,10 +179,10 @@ export default function App() {
     const session = sessions.find(s => s.id === sessionId)
     if (!session) return
 
-    if (session.branch) {
+    if (session.branch && session.workspace) {
       let dirty = false
       try {
-        const result = await window.electronAPI.worktreeIsDirty(session.branch)
+        const result = await window.electronAPI.worktreeIsDirty(session.workspace, session.branch)
         dirty = result.dirty
       } catch {}
       setCloseModal({ sessionId, session, dirty })
@@ -153,7 +207,7 @@ export default function App() {
     })
   }
 
-  const doEndSessionAndRemoveWorktree = async (sessionId, branch, dirty) => {
+  const doEndSessionAndRemoveWorktree = async (sessionId, workspace, branch, dirty) => {
     if (dirty) {
       if (!confirm(`Branch "${branch}" has uncommitted changes.\n\nRemove worktree anyway?`)) return
     }
@@ -161,7 +215,7 @@ export default function App() {
       await window.electronAPI.killSession(sessionId)
       // Small delay to let PTY process release the directory
       await new Promise(r => setTimeout(r, 500))
-      await window.electronAPI.worktreeRemove(branch, dirty)
+      await window.electronAPI.worktreeRemove(workspace, branch, dirty)
     } catch (err) {
       console.error('Failed to remove worktree:', err)
     }
@@ -181,6 +235,7 @@ export default function App() {
         activeSessionId={activeSessionId}
         onSelect={setActiveSessionId}
         onClose={handleCloseSession}
+        showWorkspace={workspaces.length > 1}
       />
       <div className="flex-1 min-h-0 relative">
         {sessions.map(session => (
@@ -213,6 +268,9 @@ export default function App() {
     </div>
   )
 
+  const hasWorkspaces = workspaces.length > 0
+  const showWelcome = !hasWorkspaces && sessions.length === 0
+
   return (
     <div className="flex flex-col h-screen overflow-hidden bg-surface-0">
       <div
@@ -221,32 +279,51 @@ export default function App() {
       >
         <div className="flex items-center gap-3 pl-16">
           <span className="text-xs font-medium text-text-secondary">Agent Manager</span>
-          <div className="flex border border-border rounded overflow-hidden" style={{ WebkitAppRegion: 'no-drag' }}>
+          {hasWorkspaces && (
+            <div className="flex border border-border rounded overflow-hidden" style={{ WebkitAppRegion: 'no-drag' }}>
+              <button
+                onClick={() => setView('board')}
+                className={`text-[11px] px-2.5 py-1 transition-colors ${view === 'board' ? 'bg-surface-2 text-text-primary' : 'text-text-muted hover:text-text-secondary'}`}
+              >
+                Board
+              </button>
+              <button
+                onClick={() => setView('agent')}
+                className={`text-[11px] px-2.5 py-1 transition-colors ${view === 'agent' ? 'bg-surface-2 text-text-primary' : 'text-text-muted hover:text-text-secondary'}`}
+              >
+                Agent
+              </button>
+            </div>
+          )}
+        </div>
+        {hasWorkspaces && (
+          <div style={{ WebkitAppRegion: 'no-drag' }}>
             <button
-              onClick={() => setView('agent')}
-              className={`text-[11px] px-2.5 py-1 transition-colors ${view === 'agent' ? 'bg-surface-2 text-text-primary' : 'text-text-muted hover:text-text-secondary'}`}
+              onClick={openNewAgentModal}
+              className="text-xs text-text-muted hover:text-text-primary border border-border hover:border-border-bright rounded px-2 py-1 transition-colors"
             >
-              Agent
+              + New Agent
             </button>
+          </div>
+        )}
+      </div>
+
+      {showWelcome && (
+        <div className="flex-1 flex items-center justify-center">
+          <div className="text-center">
+            <h2 className="text-sm font-semibold text-text-primary mb-2">Welcome to Agent Manager</h2>
+            <p className="text-xs text-text-muted mb-6">Select a git repository to get started.</p>
             <button
-              onClick={() => setView('board')}
-              className={`text-[11px] px-2.5 py-1 transition-colors ${view === 'board' ? 'bg-surface-2 text-text-primary' : 'text-text-muted hover:text-text-secondary'}`}
+              onClick={handleAddWorkspace}
+              className="text-xs bg-status-running text-white rounded px-4 py-2 hover:opacity-90 transition-opacity"
             >
-              Board
+              Open Workspace
             </button>
           </div>
         </div>
-        <div style={{ WebkitAppRegion: 'no-drag' }}>
-          <button
-            onClick={() => setShowNewAgent(true)}
-            className="text-xs text-text-muted hover:text-text-primary border border-border hover:border-border-bright rounded px-2 py-1 transition-colors"
-          >
-            + New Agent
-          </button>
-        </div>
-      </div>
+      )}
 
-      <div className={`flex-1 min-h-0 ${view === 'agent' ? 'flex' : 'hidden'}`}>
+      <div className={`flex-1 min-h-0 ${view === 'agent' && !showWelcome ? 'flex' : 'hidden'}`}>
         <ResizableSplit
           left={sidebar}
           right={terminals}
@@ -255,12 +332,13 @@ export default function App() {
           minRightPx={400}
         />
       </div>
-      <div className={`flex-1 min-h-0 ${view === 'board' ? 'flex' : 'hidden'}`}>
+      <div className={`flex-1 min-h-0 ${view === 'board' && !showWelcome ? 'flex' : 'hidden'}`}>
         <KanbanBoard
           sessions={sessions}
           onSelectAgent={handleSelectAgent}
           onClose={handleCloseSession}
-          onNewAgent={() => setShowNewAgent(true)}
+          onNewAgent={openNewAgentModal}
+          showWorkspace={workspaces.length > 1}
         />
       </div>
 
@@ -274,7 +352,7 @@ export default function App() {
             onClick={(e) => e.stopPropagation()}
           >
             <h2 className="text-sm font-semibold text-text-primary mb-2">
-              Close "{closeModal.session.branch}"
+              Close &quot;{closeModal.session.branch}&quot;
             </h2>
             {closeModal.dirty && (
               <p className="text-xs text-status-guidance mb-4">
@@ -297,7 +375,7 @@ export default function App() {
                 onClick={() => {
                   const { sessionId, session, dirty } = closeModal
                   setCloseModal(null)
-                  doEndSessionAndRemoveWorktree(sessionId, session.branch, dirty)
+                  doEndSessionAndRemoveWorktree(sessionId, session.workspace, session.branch, dirty)
                 }}
                 className="w-full text-xs text-left bg-surface-0 hover:bg-surface-2 text-text-primary border border-border rounded px-3 py-2.5 transition-colors"
               >
@@ -326,15 +404,59 @@ export default function App() {
           >
             <h2 className="text-sm font-semibold text-text-primary mb-4">New Agent</h2>
             <form onSubmit={(e) => { e.preventDefault(); handleNewAgent() }}>
-              <label className="text-xs text-text-secondary block mb-1.5">Branch name</label>
-              <input
-                autoFocus
-                value={branchInput}
-                onChange={(e) => setBranchInput(e.target.value)}
-                onKeyDown={(e) => e.key === 'Escape' && setShowNewAgent(false)}
-                placeholder="feat-my-feature"
-                className="w-full text-xs font-mono bg-surface-0 text-text-primary border border-border rounded px-3 py-2 outline-none focus:border-status-running"
-              />
+              <label className="text-xs text-text-secondary block mb-1.5">Workspace</label>
+              <select
+                value={selectedWorkspace || ''}
+                onChange={async (e) => {
+                  if (e.target.value === '__add__') {
+                    e.target.value = selectedWorkspace || ''
+                    const ws = await window.electronAPI.addWorkspaceViaDialog()
+                    if (ws) {
+                      setWorkspaces(prev => {
+                        if (prev.some(w => w.path === ws.path)) return prev
+                        return [...prev, ws]
+                      })
+                      setSelectedWorkspace(ws.path)
+                    }
+                  } else {
+                    setSelectedWorkspace(e.target.value)
+                  }
+                }}
+                className="w-full text-xs font-mono bg-surface-0 text-text-primary border border-border rounded px-3 py-2 outline-none focus:border-status-running mb-4"
+              >
+                {workspaces.map(ws => (
+                  <option key={ws.path} value={ws.path}>{ws.name}</option>
+                ))}
+                <option value="__add__">+ Add workspace…</option>
+              </select>
+              {selectedWs?.isGit ? (
+                <>
+                  <label className="text-xs text-text-secondary block mb-1.5">Agent name</label>
+                  <input
+                    autoFocus
+                    value={branchInput}
+                    onChange={(e) => setBranchInput(e.target.value)}
+                    onKeyDown={(e) => e.key === 'Escape' && setShowNewAgent(false)}
+                    placeholder="feat-my-feature"
+                    className="w-full text-xs font-mono bg-surface-0 text-text-primary border border-border rounded px-3 py-2 outline-none focus:border-status-running"
+                  />
+                </>
+              ) : (
+                <>
+                  <p className="text-[11px] text-status-guidance mb-3">
+                    Not a git repository. Worktree isolation is unavailable — the agent will run directly in this directory.
+                  </p>
+                  <label className="text-xs text-text-secondary block mb-1.5">Agent name (optional)</label>
+                  <input
+                    autoFocus
+                    value={branchInput}
+                    onChange={(e) => setBranchInput(e.target.value)}
+                    onKeyDown={(e) => e.key === 'Escape' && setShowNewAgent(false)}
+                    placeholder={selectedWs?.name || 'my-agent'}
+                    className="w-full text-xs font-mono bg-surface-0 text-text-primary border border-border rounded px-3 py-2 outline-none focus:border-status-running"
+                  />
+                </>
+              )}
               <div className="flex justify-end gap-2 mt-5">
                 <button
                   type="button"
@@ -345,7 +467,7 @@ export default function App() {
                 </button>
                 <button
                   type="submit"
-                  disabled={!branchInput.trim()}
+                  disabled={selectedWs?.isGit ? (!branchInput.trim() || !selectedWorkspace) : !selectedWorkspace}
                   className="text-xs bg-status-running text-white rounded px-3 py-1.5 hover:opacity-90 transition-opacity disabled:opacity-40"
                 >
                   Create

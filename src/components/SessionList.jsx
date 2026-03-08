@@ -6,7 +6,7 @@ const DOT = {
   error: 'bg-red-500',
 }
 
-export default function SessionList({ sessions, activeSessionId, onSelect, onClose }) {
+export default function SessionList({ sessions, activeSessionId, onSelect, onClose, showWorkspace }) {
   return (
     <div className="border-b border-border shrink-0">
       {sessions.map((session) => {
@@ -29,6 +29,11 @@ export default function SessionList({ sessions, activeSessionId, onSelect, onClo
                   {session.branch ? session.branch : session.name}
                 </p>
               </div>
+              {showWorkspace && session.workspace && (
+                <p className="text-[10px] text-text-muted truncate">
+                  {session.workspace.split('/').pop()}
+                </p>
+              )}
               {session.lastEvent && (
                 <p className="text-xs font-mono text-text-muted truncate mt-0.5">
                   {session.lastEvent}
