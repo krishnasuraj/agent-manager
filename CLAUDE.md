@@ -198,6 +198,8 @@ npm install
 npm run rebuild       # electron-rebuild for node-pty
 npm run dev           # electron-vite dev — hot reload for renderer only
 npm run build         # production build to out/
+npm run dist          # build + package macOS DMGs (arm64 + x64)
+npm run dist:all      # build + package for all platforms
 ```
 
 **node-pty rebuild on macOS** — if CLT headers not found:
@@ -206,6 +208,48 @@ CXXFLAGS="-I$(xcrun --show-sdk-path)/usr/include/c++/v1 -isysroot $(xcrun --show
 ```
 
 **Main process changes** (`electron/`) require restarting `npm run dev`. Renderer changes (`src/`) hot-reload.
+
+### Releasing a New Version
+
+**1. Bump version** in `package.json`.
+
+**2. Build the DMGs:**
+```bash
+npm run dist
+```
+
+**3. Commit, tag, and push:**
+```bash
+git add -A && git commit -m "release: vX.Y.Z"
+git tag vX.Y.Z
+git push && git push origin vX.Y.Z
+```
+
+**4. Create the GitHub Release:**
+```bash
+gh release create vX.Y.Z \
+  "release/Agent Manager-X.Y.Z-arm64.dmg" \
+  "release/Agent Manager-X.Y.Z.dmg" \
+  --title "vX.Y.Z" \
+  --notes "Release notes here"
+```
+
+**5. Update the Homebrew tap** (`krishnasuraj/homebrew-tap`):
+```bash
+# Get new SHA256 hashes
+shasum -a 256 "release/Agent Manager-X.Y.Z-arm64.dmg"
+shasum -a 256 "release/Agent Manager-X.Y.Z.dmg"
+
+# Edit Casks/agent-manager.rb in the homebrew-tap repo:
+#   - Update `version "X.Y.Z"`
+#   - Update both `sha256` values
+# Then commit and push to krishnasuraj/homebrew-tap
+```
+
+**Install methods for users:**
+- **Direct download:** grab the DMG from the GitHub Releases page
+- **Homebrew:** `brew install --cask krishnasuraj/tap/agent-manager`
+- Both require `xattr -cr "/Applications/Agent Manager.app"` on first launch (not notarized)
 
 ### Theme Tokens (`src/index.css` via `@theme`)
 
@@ -285,6 +329,23 @@ Single window: sidebar (30%) + terminal (70%). Auto-spawns a login shell. User s
 
 ---
 
+### Stage 4.5: Distribution & Release ✅ Complete
+
+**Goal:** Package the app for distribution and set up auto-updates.
+
+**What we built:**
+- **electron-builder config** in `package.json`: macOS DMG (arm64 + x64), Windows NSIS, Linux AppImage
+- **Auto-updater** via `electron-updater`: checks GitHub Releases on launch, downloads in background, prompts "Restart Now / Later". Skipped in dev mode.
+- **App icon**: pixel-art helm converted via `sips` + `iconutil` to `.icns` (macOS) and `.png` (Windows/Linux)
+- **GitHub Release workflow**: `npm run dist` builds DMGs, `gh release create` uploads them with release notes
+- **Ad-hoc code signing**: no Apple Developer account, so Gatekeeper warns on first launch. Users right-click → Open or use System Settings → Privacy & Security → Open Anyway.
+
+**Scripts:**
+- `npm run dist` — build + package macOS DMGs (arm64 + x64)
+- `npm run dist:all` — build + package for all platforms
+
+---
+
 ### Stage 5: Polish + Advanced Features
 
 - **Search.** Full-text search across JSONL transcripts.
@@ -332,6 +393,23 @@ If `fatal error: 'functional' file not found`:
 ```bash
 CXXFLAGS="-I$(xcrun --show-sdk-path)/usr/include/c++/v1 -isysroot $(xcrun --show-sdk-path)" npx electron-rebuild -f -w node-pty
 ```
+
+### node-pty `posix_spawnp failed` after dependency changes
+If node-pty throws `posix_spawnp failed` at runtime, the native binary is out of sync with Electron. Fix: `npm run rebuild`. This commonly happens after installing/updating packages or switching Electron versions.
+
+### electron-updater is CommonJS
+`electron-updater` doesn't support ESM named exports. Must use default import:
+```js
+import pkg from 'electron-updater'
+const { autoUpdater } = pkg
+```
+NOT `import { autoUpdater } from 'electron-updater'` — this throws `SyntaxError: Named export 'autoUpdater' not found`.
+
+### Universal macOS build fails with node-pty
+`@electron/universal` can't merge arm64 and x64 node-pty binaries ("Detected file that's the same in both x64 and arm64 builds"). Fix: build separate arm64 and x64 DMGs instead of a universal binary.
+
+### macOS Gatekeeper without Apple Developer account
+Ad-hoc signed apps trigger "Apple could not verify" warning. Users must: right-click → Open, or System Settings → Privacy & Security → Open Anyway. Apple Developer Program ($99/year) is the only way to get notarization and remove the warning.
 
 ---
 
@@ -447,7 +525,7 @@ Single window: login shell spawned automatically, user types `claude`. JSONL wat
 
 ---
 
-## Stage 4 Implementation Log
+## Stage 4 Implementation Log (Orchestration + Multi-Workspace)
 
 ### Key Decisions
 
@@ -473,3 +551,39 @@ Single window: login shell spawned automatically, user types `claude`. JSONL wat
 | Can't select workspace in New Agent modal | Single-workspace case showed static label, no way to change | Always show dropdown with "+ Add workspace" option |
 | "Not a Git Repository" error blocks adding non-git workspaces | `addWorkspaceViaDialog` rejected non-git dirs with `showErrorBox` | Allow any directory, tag with `isGit` flag, show warning in modal |
 | `openNewAgentModal()` infinite recursion | `replace_all` on `setShowNewAgent(true)` → `openNewAgentModal()` also replaced the one inside the function body | Manual fix: ensure function body calls `setShowNewAgent(true)` not itself |
+
+---
+
+## Stage 4.5 Implementation Log (Distribution & Release)
+
+### Key Decisions
+
+1. **Separate arch builds, not universal.** `@electron/universal` fails on node-pty native binaries. Building separate arm64 and x64 DMGs is simpler and avoids the merge issue entirely.
+
+2. **CXXFLAGS in dist script.** node-pty rebuild during `electron-builder` needs the same macOS CLT header workaround as manual `electron-rebuild`. Baked into the `dist` npm script so it's not forgotten.
+
+3. **Auto-updater checks GitHub Releases.** `electron-updater` with `publish.provider: "github"` checks for new releases on app launch. Downloads in background, prompts restart. Skipped when `ELECTRON_RENDERER_URL` is set (dev mode).
+
+4. **Ad-hoc signing is fine for now.** Apple notarization requires $99/year Developer Program. For developer-audience distribution, the Gatekeeper workaround (right-click → Open) is acceptable. Revisit if distributing to non-technical users.
+
+### Code Cleanup Applied
+
+Ran `/simplify` review across the codebase. Fixes applied:
+
+**`electron/main.js`:**
+- Extracted `getActiveWindow()` helper — replaced 4 inline `mainWindow || BrowserWindow.getAllWindows()[0]` patterns
+- Extracted `pickDirectory()` helper — replaced 3 duplicate `dialog.showOpenDialog` calls (workspace add via dialog, folder picker IPC, menu Add Workspace)
+
+**`src/App.jsx`:**
+- Extracted `removeSession(sessionId)` — deduplicated identical `setSessions` filter + activeId logic from `doEndSession` and `doEndSessionAndRemoveWorktree`
+- Removed duplicate `getWorkspaces()` call on mount — reused promise from first call via `wsPromise`
+- Fixed `onMenuNewAgent` listener churn — uses `workspacesRef` (a ref) so the effect registers once (`[]` deps) instead of tearing down/re-registering on every workspace change
+- Extracted `addWorkspaceViaDialog()` — shared by `handleAddWorkspace` and the workspace select `onChange` handler
+
+### Bugs Encountered
+
+| Bug | Root Cause | Fix |
+|-----|-----------|-----|
+| `SyntaxError: Named export 'autoUpdater' not found` | `electron-updater` is CommonJS, can't use ESM named imports | Default import: `import pkg from 'electron-updater'; const { autoUpdater } = pkg` |
+| `posix_spawnp failed` on session spawn | node-pty native binary out of sync after dependency changes | `npm run rebuild` to recompile node-pty for current Electron |
+| Universal macOS build fails | `@electron/universal` can't merge arm64/x64 node-pty binaries | Build separate arm64 and x64 targets instead |
