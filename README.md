@@ -1,4 +1,6 @@
-# Agent Manager
+# Agent Manager 
+<img width="128" height="128" alt="helm" src="https://github.com/user-attachments/assets/7da47a7e-e560-4936-8699-4a2ac38e1796" />
+ 
 
 A desktop app for running multiple CLI coding agents in parallel. Each agent gets its own interactive terminal and isolated git worktree. A kanban board tracks what every agent is doing so you know which ones need your attention.
 
