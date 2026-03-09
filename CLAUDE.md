@@ -2,11 +2,11 @@
 
 ## Vision
 
-A desktop app for managing multiple Claude Code agents working in parallel across workspaces and git worktrees. The key insight: **don't fight the terminal, and don't reinvent state detection**. Claude Code already writes structured JSONL session logs to disk. We watch those for state instead of parsing terminal output or running headless agents.
+A desktop app for managing multiple coding agents (Claude Code, OpenAI Codex CLI, and future tools) working in parallel across workspaces and git worktrees. The key insight: **don't fight the terminal, and don't reinvent state detection**. Coding agents already write structured JSONL session logs to disk. We watch those for state instead of parsing terminal output or running headless agents.
 
-The architecture is: **real terminal (xterm.js + node-pty) for UX** + **JSONL session file watcher for state** + **a sidebar that surfaces what needs your attention**.
+The architecture is: **real terminal (xterm.js + node-pty) for UX** + **JSONL session file watcher for state** + **a sidebar that surfaces what needs your attention**. A **tool config abstraction** (`electron/toolConfigs.js`) makes the system agent-agnostic — each tool provides its own binary path, JSONL schema, session file locations, and PTY detection patterns.
 
-**No headless sessions.** Every agent is a real interactive terminal. The user types `claude` themselves, or we inject a command via PTY write. Claude's full interactive UI — spinners, permission prompts, colors — is always present.
+**No headless sessions.** Every agent is a real interactive terminal. The user types `claude` or `codex` themselves, or we inject a command via PTY write. The agent's full interactive UI — spinners, permission prompts, colors — is always present.
 
 ---
 
@@ -53,19 +53,24 @@ No component library — custom components only.
 
 ## State Detection: JSONL Session Files
 
-### File Location
+Each tool writes JSONL session logs to a different location with a different schema. The `toolConfig` abstraction normalizes these into a common event model.
 
-JSONL files are at:
+### File Locations
+
+**Claude Code:**
 ```
 ~/.claude/projects/<encoded-path>/<session-uuid>.jsonl
 ```
-
-**Critical:** Files are directly in the project dir — **NOT in a `sessions/` subdirectory**.
-
-The encoded path replaces `/`, `_`, and `.` with `-`. Regex: `/[/_.]/g`.
+Files are directly in the project dir — **NOT in a `sessions/` subdirectory**. The encoded path replaces `/`, `_`, and `.` with `-`. Regex: `/[/_.]/g`.
 ```
 /Users/me/my_project → -Users-me-my-project
 ```
+
+**Codex CLI:**
+```
+~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl
+```
+Date-based hierarchy, no cwd encoding in path. Routing requires reading the rollout file or timestamp-based matching (see Stage 6 plan).
 
 ### State Derivation
 
@@ -84,11 +89,17 @@ Only `user`, `assistant`, `system`, `result` are meaningful types. Walk backward
 
 ### Hybrid PTY + JSONL Detection
 
-JSONL alone can't detect everything. The PTY Manager also scans terminal output:
+JSONL alone can't detect everything. The PTY Manager also scans terminal output. Patterns are **tool-specific** and come from `toolConfig.startupPatterns`, `toolConfig.permissionPatterns`, `toolConfig.thinkingPatterns`.
 
+**Claude Code patterns:**
 - **Thinking spinners:** `/\*\s+[A-Z][a-z]+[.…]/` — matches all Claude thinking formats (`* Orbiting…`). Overrides idle to "Working."
 - **Permission prompts:** `Allow\s+Deny`, `❯\s*(Allow|Yes)`, etc. Sets "Needs Input" immediately without waiting for stale timer.
-- **Shell prompt return:** `/(?:^|\n)\s*(?:.*[$%❯>#])\s*$/` — detects Claude exiting to shell. Triggers session end (handles Ctrl+C which doesn't write a `result` event).
+- **Startup:** `/╭|Claude Code/`
+
+**Codex CLI patterns:** TBD — requires investigation (Stage 6, step 6). Codex uses Ratatui full-screen alternate screen mode, so ANSI-stripped output may look different from inline terminal tools.
+
+**Shared patterns:**
+- **Shell prompt return:** `/(?:^|\n)\s*(?:.*[$%❯>#])\s*$/` — detects agent exiting to shell. Triggers session end (handles Ctrl+C which doesn't write a `result` event).
 
 Rolling 4KB output buffer, ANSI-stripped before matching. Debounce: 3s thinking, 2s permissions, 3s shell return.
 
@@ -129,6 +140,27 @@ type ContentBlock =
 
 Tool names: `Read`, `Write`, `Bash`, `Task`, `WebSearch`.
 
+### Codex CLI JSONL Event Schema
+
+```typescript
+interface CodexRolloutEvent {
+  submission_id: number;
+  event_msg: CodexEventMsg;
+  timestamp: string;  // ISO-8601
+}
+
+type CodexEventMsg =
+  | { type: 'TurnStarted' }
+  | { type: 'AgentMessageDelta'; delta: string }
+  | { type: 'ExecCommandBegin'; command: string; cwd: string }
+  | { type: 'ExecCommandEnd'; exit_code: number; stdout: string; stderr: string }
+  | { type: 'ApprovalRequest'; command: string }
+  | { type: 'TurnComplete' }
+  // ... more event types TBD (see Stage 6 step 6 investigation)
+```
+
+**Note:** This schema is preliminary based on documentation. Must be verified by running Codex and inspecting actual rollout files (Stage 6, step 6).
+
 ---
 
 ## IPC Protocol
@@ -154,7 +186,7 @@ Tool names: `Read`, `Write`, `Bash`, `Task`, `WebSearch`.
 **Renderer → Main (invoke):**
 | Channel | Payload |
 |---------|---------|
-| `session:spawn` | `(sessionId, { cwd?, initialPrompt? })` |
+| `session:spawn` | `(sessionId, { cwd?, initialPrompt?, toolId? })` — `toolId` defaults to `'claude'` |
 | `session:kill` | `(sessionId)` |
 | `session:getCwd` | `(sessionId)` |
 | `worktree:create` | `(workspace, branch)` → `{ branch, worktreePath, existing }` |
@@ -177,6 +209,7 @@ electron/
   ptyManager.js         — PTY lifecycle + output scanning (thinking, permissions, shell return)
   jsonlWatcher.js       — Global JSONL watching, state derivation, session lifecycle
   worktreeManager.js    — Git worktree operations as plain functions (repoRoot per call)
+  toolConfigs.js        — (Stage 6) Tool config registry: binary paths, JSONL schemas, PTY patterns per tool
 src/
   components/
     TerminalPanel.jsx   — xterm.js terminal with FitAddon + WebLinksAddon
@@ -354,6 +387,122 @@ Single window: sidebar (30%) + terminal (70%). Auto-spawns a login shell. User s
 - **Session replay.** Load a completed JSONL and replay the event timeline.
 - **Claude Code hooks.** Register PreToolUse/PostToolUse/Stop hooks that write to a named pipe. Gives sub-second tool-level events before JSONL is written.
 - **MCP `requestGuidance` server.** Small MCP server exposing a `requestGuidance(question)` tool. When Claude calls it, show the question in the UI with a text input. User's answer is returned as the tool result. Cleanly solves the guidance/input problem.
+
+---
+
+### Stage 6: Multi-Tool Support (Codex CLI)
+
+**Goal:** Support OpenAI Codex CLI alongside Claude Code. Any coding agent that runs in a terminal and writes JSONL session logs can be managed.
+
+#### Background: Codex CLI
+
+OpenAI's open-source coding agent ([github.com/openai/codex](https://github.com/openai/codex)). Rust binary, installed via `npm install -g @openai/codex` or `brew install codex`. Two modes: interactive TUI (Ratatui full-screen) and headless (`codex exec`). Uses `AGENTS.md` (analogous to `CLAUDE.md`). Three-tier permission model (untrusted/on-request/never) with platform-specific sandboxing.
+
+#### Codex vs Claude Code: Key Differences
+
+| Aspect | Claude Code | Codex CLI |
+|--------|-------------|-----------|
+| Session files | `~/.claude/projects/<encoded-path>/<uuid>.jsonl` | `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` |
+| Path scheme | Encoded cwd (`/[/_.]/g` → `-`) | Date-based directory hierarchy |
+| JSONL schema | `{type, message, uuid, sessionId}` | `{submission_id, event_msg, timestamp}` |
+| Event types | `user`, `assistant`, `system`, `result` | `TurnStarted`, `AgentMessageDelta`, `ExecCommandBegin`, `ApprovalRequest`, `TurnComplete` |
+| TUI | Inline terminal (works naturally in xterm.js) | Ratatui full-screen alternate screen |
+| Resume | `claude --resume <id>` (appends to same JSONL) | `codex resume [SESSION_ID]` (replays rollout) |
+| Config | `~/.claude/` | `~/.codex/config.toml` |
+| Nesting env vars | `CLAUDECODE`, `CLAUDE_CODE_SSE_PORT`, `CLAUDE_CODE_ENTRYPOINT` | Not documented |
+
+#### Step 1: Tool Config Abstraction
+
+Create `electron/toolConfigs.js` — a registry of tool-specific constants, patterns, and parsers. Each tool config provides:
+
+```javascript
+{
+  id: 'claude' | 'codex',
+  displayName: 'Claude Code' | 'Codex CLI',
+  binary: 'claude' | 'codex',
+  binarySearchPaths: [...],           // candidates for findBinary()
+  sessionRoot: '~/.claude/projects'|'~/.codex/sessions',
+  resumeCmd: (id) => string,          // e.g. 'claude --resume "id"' or 'codex resume id'
+  envPrefixToScrub: 'CLAUDE' | null,  // env vars to delete to prevent nesting
+  // PTY detection patterns
+  startupPatterns: RegExp[],           // detect tool launched in terminal
+  permissionPatterns: RegExp[],        // detect permission/approval prompts
+  thinkingPatterns: RegExp[],          // detect thinking/processing indicators
+  // JSONL parsing
+  watchPath: string,                   // chokidar root (different structure per tool)
+  watchDepth: number,                  // chokidar depth
+  parseEvent: (line) => NormalizedEvent,  // parse tool-specific JSONL → common schema
+  deriveState: (events, staleness) => State,
+  isNoiseEvent: (event) => boolean,
+  // Session file routing
+  matchFileToSession: (filePath, sessions) => sessionId | null,
+}
+```
+
+**Normalized event schema** (tool-agnostic, used by sidebar/kanban):
+```typescript
+interface NormalizedEvent {
+  type: 'user' | 'assistant' | 'tool_call' | 'tool_result' | 'thinking' | 'result';
+  toolName?: string;
+  summary?: string;
+  timestamp: string;
+  raw: any;  // original event for debugging
+}
+```
+
+#### Step 2: Refactor ptyManager.js
+
+- Replace `findClaudeBinary()` with `findBinary(toolConfig)`
+- Replace hardcoded `PERMISSION_PATTERNS`, `SHELL_PROMPT_PATTERNS`, startup detection with `toolConfig.permissionPatterns`, etc.
+- Parameterize auto-launch: `toolConfig.binary` instead of hardcoded `'claude'`
+- Session model gains `toolId` field: `{ id, cwd, workspace, toolId: 'claude'|'codex' }`
+
+#### Step 3: Refactor jsonlWatcher.js
+
+This is the biggest change. Currently watches `~/.claude/projects/` with Claude-specific path encoding and event parsing.
+
+- **Watch multiple roots.** One chokidar watcher per active tool (Claude: `~/.claude/projects/`, Codex: `~/.codex/sessions/`). Or a single watcher if both roots can be watched.
+- **Routing.** Claude routes by encoded cwd in path. Codex uses date-based dirs — routing requires reading the rollout file to find cwd, or matching by `submission_id`.
+- **Event parsing.** `toolConfig.parseEvent(line)` normalizes to common schema. State derivation uses `toolConfig.deriveState()`.
+- **Session lifecycle.** Claude: lock on `change` when file grows past snapshot. Codex: TBD — need to test whether Codex also creates throwaway files or writes cleanly.
+
+**Key risk:** Codex's date-based session directory (`YYYY/MM/DD/rollout-*.jsonl`) doesn't encode the cwd in the path. Routing JSONL files to sessions can't use the same cwd-matching approach. Options:
+1. Read the first event in the rollout file to get the cwd/session context
+2. Track which rollout file was created after spawning (timestamp-based matching)
+3. Use Codex's `submission_id` to correlate
+
+#### Step 4: Refactor main.js
+
+- Scrub env vars per tool config (`envPrefixToScrub`)
+- `session:spawn` IPC gains `toolId` parameter
+- New Agent modal passes selected tool to spawn
+
+#### Step 5: UI Changes
+
+- **New Agent modal:** Add tool selector (Claude Code / Codex CLI) before branch name. Remember last selection.
+- **Session list:** Show tool icon/label per session so user knows which agent is which.
+- **Kanban cards:** Tool indicator (small icon or label).
+- **State colors:** Same status colors regardless of tool (Working = blue, Needs Input = amber, Idle = gray).
+
+#### Step 6: Codex-Specific Investigation (do first)
+
+Before writing code, manually test Codex in the app's xterm.js terminal:
+
+1. Spawn a shell, run `codex` manually. Does the Ratatui full-screen UI work in xterm.js? (It should — xterm.js is a real VT emulator.)
+2. Run a Codex session, inspect `~/.codex/sessions/` — document the exact JSONL event flow, field names, event ordering.
+3. Test PTY output scanning — what does ANSI-stripped Ratatui output look like? Can we detect startup, permissions, exit?
+4. Test `codex resume` — does it append to the same rollout file or create a new one?
+5. Check if Codex sets any env vars that would cause nesting issues.
+
+**This investigation must happen before steps 1–5.** The Codex JSONL schema and PTY output patterns will determine the exact implementation.
+
+#### What Stays the Same
+
+- xterm.js terminal rendering (tool-agnostic)
+- Worktree management (pure git, no tool dependency)
+- IPC protocol structure (session lifecycle channels)
+- Kanban board layout and interaction
+- CSS-hidden terminal switching
 
 ---
 
