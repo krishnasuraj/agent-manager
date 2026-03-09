@@ -69,6 +69,7 @@ export default function TerminalPanel({ sessionId, active }) {
     const observer = new ResizeObserver(() => {
       try {
         fitAddon.fit()
+        term.scrollToBottom()
         if (sessionIdRef.current) {
           window.electronAPI.ptyResize(sessionIdRef.current, term.cols, term.rows)
         }
@@ -91,6 +92,7 @@ export default function TerminalPanel({ sessionId, active }) {
     requestAnimationFrame(() => {
       try {
         fitAddonRef.current?.fit()
+        termRef.current?.scrollToBottom()
         if (sessionIdRef.current && termRef.current) {
           window.electronAPI.ptyResize(sessionIdRef.current, termRef.current.cols, termRef.current.rows)
         }
