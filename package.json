@@ -4,7 +4,7 @@
   "description": "Desktop app for managing multiple Claude Code agents in parallel",
   "author": "Krishna Suraj",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "main": "out/main/main.js",
   "scripts": {
