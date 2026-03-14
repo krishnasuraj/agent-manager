@@ -28,6 +28,17 @@ export default function SessionList({ sessions, activeSessionId, onSelect, onClo
                 <p className={`text-xs font-mono ${isActive ? 'font-semibold text-text-primary' : 'text-text-secondary'}`}>
                   {session.branch ? session.branch : session.name}
                 </p>
+                {session.toolId && (
+                  <span
+                    className="text-[9px] font-mono rounded px-1 py-0.5"
+                    style={{
+                      color: session.toolId === 'claude' ? '#E07A47' : '#7300ff',
+                      backgroundColor: session.toolId === 'claude' ? 'rgba(224,122,71,0.15)' : 'rgba(115,0,255,0.15)',
+                    }}
+                  >
+                    {session.toolId}
+                  </span>
+                )}
               </div>
               {showWorkspace && session.workspace && (
                 <p className="text-[10px] text-text-muted truncate">

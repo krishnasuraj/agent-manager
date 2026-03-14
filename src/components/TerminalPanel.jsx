@@ -8,9 +8,40 @@ export default function TerminalPanel({ sessionId, active }) {
   const termRef = useRef(null)
   const fitAddonRef = useRef(null)
   const sessionIdRef = useRef(sessionId)
+  const activeRef = useRef(active)
+  const lastSizeRef = useRef({ cols: 0, rows: 0 })
 
-  // Keep ref in sync
+  // Keep refs in sync
   sessionIdRef.current = sessionId
+  activeRef.current = active
+
+  // Helper: fit xterm.js to container + resize PTY only on genuine size changes.
+  // "Genuine" = both old and new sizes are non-zero (actual window resize).
+  // Hidden→visible transitions (0→real) just update the ref without sending
+  // pty:resize, so full-screen TUI apps (Codex/Ratatui) don't redraw.
+  function fitAndResize() {
+    const fitAddon = fitAddonRef.current
+    const term = termRef.current
+    if (!fitAddon || !term) return
+
+    try {
+      fitAddon.fit()
+    } catch { return }
+
+    const { cols, rows } = term
+    if (cols <= 0 || rows <= 0) return
+
+    const prev = lastSizeRef.current
+    if (cols === prev.cols && rows === prev.rows) return
+
+    const wasHidden = prev.cols === 0 || prev.rows === 0
+    lastSizeRef.current = { cols, rows }
+
+    // Only send resize to PTY on genuine size changes, not hidden→visible
+    if (!wasHidden && sessionIdRef.current) {
+      window.electronAPI.ptyResize(sessionIdRef.current, cols, rows)
+    }
+  }
 
   // Create terminal once on mount
   useEffect(() => {
@@ -54,10 +85,14 @@ export default function TerminalPanel({ sessionId, active }) {
     term.loadAddon(webLinksAddon)
     term.open(containerRef.current)
 
-    try { fitAddon.fit() } catch { /* */ }
-
     termRef.current = term
     fitAddonRef.current = fitAddon
+
+    // Initial fit
+    try {
+      fitAddon.fit()
+      lastSizeRef.current = { cols: term.cols, rows: term.rows }
+    } catch { /* */ }
 
     // Terminal input → PTY (always uses current sessionId)
     const inputDisposable = term.onData((data) => {
@@ -66,14 +101,9 @@ export default function TerminalPanel({ sessionId, active }) {
       }
     })
 
-    // Resize observer
+    // Resize observer — skip when hidden to avoid bogus 0-size resizes
     const observer = new ResizeObserver(() => {
-      try {
-        fitAddon.fit()
-        if (sessionIdRef.current) {
-          window.electronAPI.ptyResize(sessionIdRef.current, term.cols, term.rows)
-        }
-      } catch { /* */ }
+      fitAndResize()
     })
     observer.observe(containerRef.current)
 
@@ -90,12 +120,7 @@ export default function TerminalPanel({ sessionId, active }) {
   useEffect(() => {
     if (!active) return
     requestAnimationFrame(() => {
-      try {
-        fitAddonRef.current?.fit()
-        if (sessionIdRef.current && termRef.current) {
-          window.electronAPI.ptyResize(sessionIdRef.current, termRef.current.cols, termRef.current.rows)
-        }
-      } catch { /* */ }
+      fitAndResize()
     })
   }, [active])
 
@@ -104,10 +129,7 @@ export default function TerminalPanel({ sessionId, active }) {
     if (!sessionId) return
 
     // Send initial resize
-    if (termRef.current) {
-      const { cols, rows } = termRef.current
-      window.electronAPI.ptyResize(sessionId, cols, rows)
-    }
+    fitAndResize()
 
     const removeDataListener = window.electronAPI.onPtyData((sid, data) => {
       if (sid === sessionId && termRef.current) {

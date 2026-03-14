@@ -13,18 +13,20 @@ export default function App() {
   const [branchInput, setBranchInput] = useState('')
   const [workspaces, setWorkspaces] = useState([])
   const [selectedWorkspace, setSelectedWorkspace] = useState(null)
+  const [availableTools, setAvailableTools] = useState([])
+  const [selectedTool, setSelectedTool] = useState('claude')
   const spawned = useRef(false)
   const workspacesRef = useRef(workspaces)
 
-  const spawnAgent = useCallback(async (branch, workspace, cwd) => {
+  const spawnAgent = useCallback(async (branch, workspace, cwd, toolId = 'claude') => {
     const id = `session-${Date.now()}`
     setSessions(prev => [...prev, {
-      id, name: branch, branch, workspace, claudeActive: false, state: null, lastEvent: null,
+      id, name: branch, branch, workspace, toolId, claudeActive: false, state: null, lastEvent: null,
     }])
     setActiveSessionId(id)
     setView('agent')
     try {
-      await window.electronAPI.spawnSession(id, { cwd })
+      await window.electronAPI.spawnSession(id, { cwd, toolId })
     } catch (err) {
       console.error('Failed to spawn session:', err)
     }
@@ -34,6 +36,10 @@ export default function App() {
   useEffect(() => {
     if (spawned.current) return
     spawned.current = true
+
+    window.electronAPI.getAvailableTools().then(tools => {
+      if (tools?.length > 0) setAvailableTools(tools)
+    })
 
     const wsPromise = window.electronAPI.getWorkspaces().then(ws => {
       setWorkspaces(ws)
@@ -157,7 +163,7 @@ export default function App() {
 
       try {
         const { worktreePath } = await window.electronAPI.worktreeCreate(selectedWorkspace, branch)
-        await spawnAgent(branch, selectedWorkspace, worktreePath)
+        await spawnAgent(branch, selectedWorkspace, worktreePath, selectedTool)
       } catch (err) {
         console.error('Failed to create agent:', err)
         alert(`Failed to create agent: ${err.message}`)
@@ -167,7 +173,7 @@ export default function App() {
       const name = branch || selectedWs?.name || 'agent'
       setShowNewAgent(false)
       setBranchInput('')
-      await spawnAgent(name, selectedWorkspace, selectedWorkspace)
+      await spawnAgent(name, selectedWorkspace, selectedWorkspace, selectedTool)
     }
   }
 
@@ -384,7 +390,7 @@ export default function App() {
                 className="w-full text-xs text-left bg-surface-0 hover:bg-surface-2 text-text-primary border border-border rounded px-3 py-2.5 transition-colors"
               >
                 <span className="font-medium">End session</span>
-                <span className="text-text-muted block mt-0.5">Kill Claude and close the terminal. Worktree stays on disk.</span>
+                <span className="text-text-muted block mt-0.5">Kill the agent and close the terminal. Worktree stays on disk.</span>
               </button>
               <button
                 onClick={() => {
@@ -395,7 +401,7 @@ export default function App() {
                 className="w-full text-xs text-left bg-surface-0 hover:bg-surface-2 text-text-primary border border-border rounded px-3 py-2.5 transition-colors"
               >
                 <span className="font-medium">End session + remove worktree</span>
-                <span className="text-text-muted block mt-0.5">Kill Claude, close the terminal, and delete the worktree directory.</span>
+                <span className="text-text-muted block mt-0.5">Kill the agent, close the terminal, and delete the worktree directory.</span>
               </button>
               <button
                 onClick={() => setCloseModal(null)}
@@ -446,6 +452,27 @@ export default function App() {
                 ))}
                 <option value="__add__">+ Add workspace…</option>
               </select>
+              {availableTools.length > 1 && (
+                <>
+                  <label className="text-xs text-text-secondary block mb-1.5">Tool</label>
+                  <div className="flex gap-1.5 mb-4">
+                    {availableTools.map(tool => (
+                      <button
+                        key={tool.id}
+                        type="button"
+                        onClick={() => setSelectedTool(tool.id)}
+                        className={`text-xs font-mono px-3 py-1.5 rounded border transition-colors ${
+                          selectedTool === tool.id
+                            ? 'bg-surface-2 border-border-bright text-text-primary'
+                            : 'bg-surface-0 border-border text-text-muted hover:text-text-secondary'
+                        }`}
+                      >
+                        {tool.displayName}
+                      </button>
+                    ))}
+                  </div>
+                </>
+              )}
               {selectedWs?.isGit ? (
                 <>
                   <label className="text-xs text-text-secondary block mb-1.5">Agent name</label>
