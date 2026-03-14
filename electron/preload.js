@@ -39,6 +39,20 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('menu:view', handler)
     return () => ipcRenderer.removeListener('menu:view', handler)
   },
+  onMenuSettings: (cb) => {
+    const handler = () => cb()
+    ipcRenderer.on('menu:settings', handler)
+    return () => ipcRenderer.removeListener('menu:settings', handler)
+  },
+  onNotificationSelectAgent: (cb) => {
+    const handler = (_, sessionId) => cb(sessionId)
+    ipcRenderer.on('notification:select-agent', handler)
+    return () => ipcRenderer.removeListener('notification:select-agent', handler)
+  },
+
+  // Settings
+  getSettings: () => ipcRenderer.invoke('settings:get'),
+  setSettings: (settings) => ipcRenderer.invoke('settings:set', settings),
 
   // Worktree (parameterized by workspace)
   worktreeCreate: (workspace, branch) => ipcRenderer.invoke('worktree:create', workspace, branch),

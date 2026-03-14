@@ -27,11 +27,23 @@ export function createJsonlWatcher(getWindow) {
   // filePath → sessionId: which session owns each JSONL file
   const fileOwners = new Map()
 
+  // Optional callback for state changes (used by main process for notifications)
+  let stateChangeCallback = null
+
+  function onStateChange(cb) {
+    stateChangeCallback = cb
+  }
+
   function sendToRenderer(channel, ...args) {
     const win = getWindow()
     if (win && !win.isDestroyed()) {
       win.webContents.send(channel, ...args)
     }
+  }
+
+  function emitState(sessionId, state) {
+    sendToRenderer('jsonl:state', sessionId, state)
+    if (stateChangeCallback) stateChangeCallback(sessionId, state)
   }
 
   /**
@@ -99,7 +111,7 @@ export function createJsonlWatcher(getWindow) {
     state.staleTimer = setTimeout(() => {
       readNewLines(sessionId, state)
       const derived = tc.deriveState(state.events, state.lastWriteTime)
-      sendToRenderer('jsonl:state', sessionId, derived)
+      emitState(sessionId, derived)
     }, 5000)
   }
 
@@ -227,7 +239,7 @@ export function createJsonlWatcher(getWindow) {
           // Detect session end
           if (tc.isSessionEndEvent(event)) {
             console.log(`[jsonlWatcher:${sessionId}] session end event — session ended`)
-            sendToRenderer('jsonl:state', sessionId, { state: 'done', summary: 'Session complete' })
+            emitState(sessionId, { state: 'done', summary: 'Session complete' })
             sendToRenderer('jsonl:session-ended', sessionId)
             unlockSession(sessionId, state)
             return
@@ -235,7 +247,7 @@ export function createJsonlWatcher(getWindow) {
         }
 
         const derived = tc.deriveState(state.events, state.lastWriteTime)
-        sendToRenderer('jsonl:state', sessionId, derived)
+        emitState(sessionId, derived)
       }
     })
   }
@@ -262,7 +274,7 @@ export function createJsonlWatcher(getWindow) {
     if (!state) return
     // Agent detected in PTY — activate the sidebar before JSONL locks.
     // State is idle (waiting for user prompt), not working.
-    sendToRenderer('jsonl:state', sessionId, { state: 'idle', summary: 'Waiting for prompt' })
+    emitState(sessionId, { state: 'idle', summary: 'Waiting for prompt' })
     sendToRenderer('jsonl:session-started', sessionId)
   }
 
@@ -272,7 +284,7 @@ export function createJsonlWatcher(getWindow) {
     const derived = exitCode === 0
       ? { state: 'done', summary: 'Session complete' }
       : { state: 'error', summary: `Exit code ${exitCode}` }
-    sendToRenderer('jsonl:state', sessionId, derived)
+    emitState(sessionId, derived)
   }
 
   function notifyThinking(sessionId) {
@@ -283,10 +295,10 @@ export function createJsonlWatcher(getWindow) {
     state.staleTimer = setTimeout(() => {
       const tc = getToolConfig(state.toolId)
       const derived = tc.deriveState(state.events, state.lastWriteTime)
-      sendToRenderer('jsonl:state', sessionId, derived)
+      emitState(sessionId, derived)
     }, 5000)
 
-    sendToRenderer('jsonl:state', sessionId, { state: 'working', summary: 'Thinking...' })
+    emitState(sessionId, { state: 'working', summary: 'Thinking...' })
   }
 
   function notifyPermissionPrompt(sessionId) {
@@ -301,7 +313,7 @@ export function createJsonlWatcher(getWindow) {
     if (tc.id === 'codex') {
       const derived = { state: 'needs-input', summary: 'Waiting for approval' }
       console.log(`[jsonlWatcher:${sessionId}] permission prompt (PTY) — ${derived.summary}`)
-      sendToRenderer('jsonl:state', sessionId, derived)
+      emitState(sessionId, derived)
       return
     }
 
@@ -319,7 +331,7 @@ export function createJsonlWatcher(getWindow) {
     const lastTool = toolUses[toolUses.length - 1]
     const derived = { state: 'needs-input', summary: `Waiting for approval: ${lastTool.name}` }
     console.log(`[jsonlWatcher:${sessionId}] permission prompt — ${derived.summary}`)
-    sendToRenderer('jsonl:state', sessionId, derived)
+    emitState(sessionId, derived)
   }
 
   function notifyShellReturn(sessionId) {
@@ -327,7 +339,7 @@ export function createJsonlWatcher(getWindow) {
     if (!state || !state.locked) return
 
     console.log(`[jsonlWatcher:${sessionId}] shell return — session ended`)
-    sendToRenderer('jsonl:state', sessionId, { state: 'done', summary: 'Session ended' })
+    emitState(sessionId, { state: 'done', summary: 'Session ended' })
     sendToRenderer('jsonl:session-ended', sessionId)
     unlockSession(sessionId, state)
   }
@@ -373,5 +385,5 @@ export function createJsonlWatcher(getWindow) {
     watchers.clear()
   }
 
-  return { snapshotFiles, startWatching, stopWatching, notifyStartup, notifyExit, notifyThinking, notifyPermissionPrompt, notifyShellReturn, stopAll }
+  return { snapshotFiles, startWatching, stopWatching, notifyStartup, notifyExit, notifyThinking, notifyPermissionPrompt, notifyShellReturn, stopAll, onStateChange }
 }

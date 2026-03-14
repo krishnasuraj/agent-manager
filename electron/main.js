@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, dialog, Menu, shell } from 'electron'
+import { app, BrowserWindow, ipcMain, dialog, Menu, shell, Notification } from 'electron'
 import path from 'path'
 import fs from 'fs'
 import { execFile } from 'child_process'
@@ -31,6 +31,67 @@ function getWindow() {
 
 const ptyManager = createPtyManager(getWindow)
 const jsonlWatcher = createJsonlWatcher(getWindow)
+
+// ─── Settings ─────────────────────────────────────────────────────
+
+const DEFAULT_SETTINGS = { notificationsEnabled: true }
+
+function getSettingsPath() {
+  return path.join(app.getPath('userData'), 'settings.json')
+}
+
+function loadSettings() {
+  try {
+    return { ...DEFAULT_SETTINGS, ...JSON.parse(fs.readFileSync(getSettingsPath(), 'utf8')) }
+  } catch {
+    return { ...DEFAULT_SETTINGS }
+  }
+}
+
+function saveSettings(settings) {
+  fs.writeFileSync(getSettingsPath(), JSON.stringify(settings, null, 2))
+}
+
+let settings = loadSettings()
+
+// ─── Desktop notifications ────────────────────────────────────────
+
+const notificationTimers = new Map() // sessionId → timeout
+const sessionNames = new Map() // sessionId → display name
+
+jsonlWatcher.onStateChange((sessionId, state) => {
+  if (state.state === 'needs-input') {
+    // Start 2s timer if not already running
+    if (!notificationTimers.has(sessionId)) {
+      notificationTimers.set(sessionId, setTimeout(() => {
+        notificationTimers.delete(sessionId)
+        if (!settings.notificationsEnabled) return
+        const name = sessionNames.get(sessionId) || sessionId
+        const notification = new Notification({
+          title: `${name} needs input`,
+          body: state.summary || 'Agent is waiting for input',
+          silent: false,
+        })
+        notification.on('click', () => {
+          const win = getWindow()
+          if (win) {
+            win.show()
+            win.focus()
+            win.webContents.send('notification:select-agent', sessionId)
+          }
+        })
+        notification.show()
+      }, 2000))
+    }
+  } else {
+    // State changed away from needs-input — cancel pending notification
+    const timer = notificationTimers.get(sessionId)
+    if (timer) {
+      clearTimeout(timer)
+      notificationTimers.delete(sessionId)
+    }
+  }
+})
 
 // ─── Workspace management ─────────────────────────────────────────
 
@@ -124,6 +185,14 @@ ipcMain.handle('worktree:remove', (_, workspace, branch, force) => {
 // Available tools
 ipcMain.handle('tools:list', () => getAvailableTools())
 
+// Settings
+ipcMain.handle('settings:get', () => settings)
+ipcMain.handle('settings:set', (_, newSettings) => {
+  settings = { ...DEFAULT_SETTINGS, ...newSettings }
+  saveSettings(settings)
+  return settings
+})
+
 // Folder picker
 ipcMain.handle('dialog:pick-folder', () => pickDirectory())
 
@@ -135,12 +204,19 @@ ipcMain.handle('session:getCwd', (_, sessionId) => {
 ipcMain.handle('session:kill', (_, sessionId) => {
   ptyManager.kill(sessionId)
   jsonlWatcher.stopWatching(sessionId)
+  sessionNames.delete(sessionId)
+  const timer = notificationTimers.get(sessionId)
+  if (timer) {
+    clearTimeout(timer)
+    notificationTimers.delete(sessionId)
+  }
   return { ok: true }
 })
 
 ipcMain.handle('session:spawn', (_, sessionId, opts) => {
   const cwd = opts.cwd || process.cwd()
   const toolId = opts.toolId || 'claude'
+  if (opts.name) sessionNames.set(sessionId, opts.name)
 
   const existingFiles = jsonlWatcher.snapshotFiles(toolId)
 
@@ -242,6 +318,14 @@ function buildMenu() {
             label: app.name,
             submenu: [
               { role: 'about' },
+              { type: 'separator' },
+              {
+                label: 'Settings…',
+                accelerator: 'CmdOrCtrl+,',
+                click: () => {
+                  getActiveWindow()?.webContents.send('menu:settings')
+                },
+              },
               { type: 'separator' },
               { role: 'hide' },
               { role: 'hideOthers' },

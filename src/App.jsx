@@ -18,6 +18,9 @@ export default function App() {
   const spawned = useRef(false)
   const workspacesRef = useRef(workspaces)
 
+  const [showSettings, setShowSettings] = useState(false)
+  const [settingsData, setSettingsData] = useState({ notificationsEnabled: true })
+
   const spawnAgent = useCallback(async (branch, workspace, cwd, toolId = 'claude') => {
     const id = `session-${Date.now()}`
     setSessions(prev => [...prev, {
@@ -26,7 +29,7 @@ export default function App() {
     setActiveSessionId(id)
     setView('agent')
     try {
-      await window.electronAPI.spawnSession(id, { cwd, toolId })
+      await window.electronAPI.spawnSession(id, { cwd, toolId, name: branch })
     } catch (err) {
       console.error('Failed to spawn session:', err)
     }
@@ -68,7 +71,7 @@ export default function App() {
               id, name: branch, branch, workspace: null, claudeActive: false, state: null, lastEvent: null,
             }])
             setActiveSessionId(id)
-            window.electronAPI.spawnSession(id, { cwd: testCwds[i], initialPrompt: prompt })
+            window.electronAPI.spawnSession(id, { cwd: testCwds[i], initialPrompt: prompt, name: branch })
           }, i * 2000)
         }
       } else {
@@ -94,7 +97,12 @@ export default function App() {
   // Keep workspacesRef in sync
   useEffect(() => { workspacesRef.current = workspaces }, [workspaces])
 
-  // Listen for menu events (Cmd+N from native menu, Cmd+1/2 for view switching)
+  // Load settings on mount
+  useEffect(() => {
+    window.electronAPI.getSettings().then(setSettingsData)
+  }, [])
+
+  // Listen for menu events (Cmd+N from native menu, Cmd+1/2 for view switching, Cmd+, for settings)
   useEffect(() => {
     const removeNewAgent = window.electronAPI.onMenuNewAgent(() => {
       if (workspacesRef.current.length > 0) {
@@ -102,7 +110,12 @@ export default function App() {
       }
     })
     const removeView = window.electronAPI.onMenuView((v) => setView(v))
-    return () => { removeNewAgent(); removeView() }
+    const removeSettings = window.electronAPI.onMenuSettings(() => setShowSettings(true))
+    const removeNotifSelect = window.electronAPI.onNotificationSelectAgent((sessionId) => {
+      setActiveSessionId(sessionId)
+      setView('agent')
+    })
+    return () => { removeNewAgent(); removeView(); removeSettings(); removeNotifSelect() }
   }, [])
 
   // Global IPC listeners
@@ -420,6 +433,44 @@ export default function App() {
           <span className="text-text-muted/60 ml-1.5">
             (electron {Math.round(memoryInfo.electronKB / 1024)} / agents {Math.round(memoryInfo.agentsKB / 1024)})
           </span>
+        </div>
+      )}
+
+      {showSettings && (
+        <div
+          className="fixed inset-0 bg-black/60 flex items-center justify-center z-50"
+          onClick={() => setShowSettings(false)}
+        >
+          <div
+            className="bg-surface-1 border border-border rounded-lg p-6 w-80 shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h2 className="text-sm font-semibold text-text-primary mb-4">Settings</h2>
+            <label className="flex items-center gap-2.5 text-xs text-text-secondary cursor-pointer">
+              <input
+                type="checkbox"
+                checked={settingsData.notificationsEnabled}
+                onChange={(e) => {
+                  const updated = { ...settingsData, notificationsEnabled: e.target.checked }
+                  setSettingsData(updated)
+                  window.electronAPI.setSettings(updated)
+                }}
+                className="accent-status-running"
+              />
+              Desktop notifications
+            </label>
+            <p className="text-[11px] text-text-muted mt-1.5 ml-[22px]">
+              Notify when an agent needs input for more than 2 seconds.
+            </p>
+            <div className="flex justify-end mt-5">
+              <button
+                onClick={() => setShowSettings(false)}
+                className="text-xs text-text-muted hover:text-text-primary px-3 py-1.5 transition-colors"
+              >
+                Done
+              </button>
+            </div>
+          </div>
         </div>
       )}
 
