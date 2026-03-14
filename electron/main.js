@@ -5,11 +5,16 @@ import { execFile } from 'child_process'
 import { createPtyManager } from './ptyManager.js'
 import { createJsonlWatcher } from './jsonlWatcher.js'
 import { worktreeCreate, worktreeRemove, worktreeIsDirty } from './worktreeManager.js'
+import { getAllToolConfigs, getAvailableTools } from './toolConfigs.js'
 
-// Scrub Claude env vars so child processes don't inherit nesting detection
-for (const key of Object.keys(process.env)) {
-  if (key.toUpperCase().includes('CLAUDE')) {
-    delete process.env[key]
+// Scrub env vars for all tools so child processes don't inherit nesting detection
+for (const tc of getAllToolConfigs()) {
+  if (!tc.envPrefixToScrub) continue
+  const prefix = tc.envPrefixToScrub.toUpperCase()
+  for (const key of Object.keys(process.env)) {
+    if (key.toUpperCase().includes(prefix)) {
+      delete process.env[key]
+    }
   }
 }
 
@@ -116,6 +121,9 @@ ipcMain.handle('worktree:remove', (_, workspace, branch, force) => {
   return { ok: true }
 })
 
+// Available tools
+ipcMain.handle('tools:list', () => getAvailableTools())
+
 // Folder picker
 ipcMain.handle('dialog:pick-folder', () => pickDirectory())
 
@@ -132,13 +140,17 @@ ipcMain.handle('session:kill', (_, sessionId) => {
 
 ipcMain.handle('session:spawn', (_, sessionId, opts) => {
   const cwd = opts.cwd || process.cwd()
+  const toolId = opts.toolId || 'claude'
 
-  const existingFiles = jsonlWatcher.snapshotFiles()
+  const existingFiles = jsonlWatcher.snapshotFiles(toolId)
 
-  ptyManager.spawn(sessionId, { cwd, autoLaunch: true, initialPrompt: opts.initialPrompt })
+  ptyManager.spawn(sessionId, { cwd, toolId, autoLaunch: true, initialPrompt: opts.initialPrompt })
 
-  jsonlWatcher.startWatching(sessionId, { existingFiles, cwd })
+  jsonlWatcher.startWatching(sessionId, { toolId, existingFiles, cwd })
 
+  ptyManager.onStartup(sessionId, (sid) => {
+    jsonlWatcher.notifyStartup(sid)
+  })
   ptyManager.onThinking(sessionId, (sid) => {
     jsonlWatcher.notifyThinking(sid)
   })

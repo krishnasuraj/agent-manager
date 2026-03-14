@@ -45,6 +45,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   worktreeIsDirty: (workspace, branch) => ipcRenderer.invoke('worktree:isDirty', workspace, branch),
   worktreeRemove: (workspace, branch, force) => ipcRenderer.invoke('worktree:remove', workspace, branch, force),
 
+  // Tools
+  getAvailableTools: () => ipcRenderer.invoke('tools:list'),
+
   // Session lifecycle
   spawnSession: (sessionId, opts) => ipcRenderer.invoke('session:spawn', sessionId, opts),
   killSession: (sessionId) => ipcRenderer.invoke('session:kill', sessionId),

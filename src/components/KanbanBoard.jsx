@@ -50,9 +50,22 @@ export default function KanbanBoard({ sessions, onSelectAgent, onClose, onNewAge
                     className="bg-surface-1 border border-border rounded-lg px-3 py-2.5 cursor-pointer hover:border-border-bright transition-colors"
                   >
                     <div className="flex items-center justify-between">
-                      <p className="text-xs font-mono font-medium text-text-primary truncate">
-                        {session.branch || session.name}
-                      </p>
+                      <div className="flex items-center gap-1.5">
+                        <p className="text-xs font-mono font-medium text-text-primary truncate">
+                          {session.branch || session.name}
+                        </p>
+                        {session.toolId && (
+                          <span
+                            className="text-[9px] font-mono rounded px-1 py-0.5 shrink-0"
+                            style={{
+                              color: session.toolId === 'claude' ? '#E07A47' : '#7300ff',
+                              backgroundColor: session.toolId === 'claude' ? 'rgba(224,122,71,0.15)' : 'rgba(115,0,255,0.15)',
+                            }}
+                          >
+                            {session.toolId}
+                          </span>
+                        )}
+                      </div>
                       {onClose && (
                         <button
                           onClick={(e) => {

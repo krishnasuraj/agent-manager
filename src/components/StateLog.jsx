@@ -91,8 +91,7 @@ export default function StateLog({ sessionId }) {
   if (!sessionId) {
     return (
       <div className="flex flex-col h-full bg-surface-0 items-center justify-center">
-        <p className="text-xs text-text-muted">No active Claude session</p>
-        <p className="text-xs text-text-muted mt-1">Start Claude in the terminal to begin</p>
+        <p className="text-xs text-text-muted">No active agent session</p>
       </div>
     )
   }
