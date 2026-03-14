@@ -342,5 +342,13 @@ export function createPtyManager(getWindow) {
     }
   }
 
-  return { spawn, write, resize, kill, killAll, has, getCwd, onPermissionPrompt, onThinking, onShellReturn }
+  function getPids() {
+    const pids = []
+    for (const [, session] of sessions) {
+      if (session.pty?.pid) pids.push(session.pty.pid)
+    }
+    return pids
+  }
+
+  return { spawn, write, resize, kill, killAll, has, getCwd, getPids, onPermissionPrompt, onThinking, onShellReturn }
 }

@@ -24,6 +24,9 @@ import { watch } from 'chokidar'
 // Event types that carry meaningful conversation state
 const MEANINGFUL_TYPES = new Set(['user', 'assistant', 'system', 'result'])
 
+// Max events kept in memory per session — only the tail matters for state derivation
+const MAX_EVENTS = 50
+
 /**
  * Derive the state from the latest JSONL events.
  */
@@ -399,6 +402,9 @@ export function createJsonlWatcher(getWindow) {
         try {
           const event = JSON.parse(trimmed)
           state.events.push(event)
+          if (state.events.length > MAX_EVENTS) {
+            state.events = state.events.slice(-MAX_EVENTS)
+          }
           newEvents.push(event)
         } catch { /* incomplete line */ }
       }
@@ -441,7 +447,18 @@ export function createJsonlWatcher(getWindow) {
     state.events = []
     clearTimeout(state.staleTimer)
     state.staleTimer = null
-    state.knownFiles = snapshotFiles()
+    // Re-snapshot only the session's own project dir, not the entire ~/.claude/projects/
+    const projectDir = getProjectDir(state.cwd)
+    try {
+      for (const f of fs.readdirSync(projectDir)) {
+        if (f.endsWith('.jsonl')) {
+          const filePath = path.join(projectDir, f)
+          try {
+            state.knownFiles.set(filePath, fs.statSync(filePath).size)
+          } catch { /* */ }
+        }
+      }
+    } catch { /* */ }
   }
 
   function notifyExit(sessionId, exitCode) {

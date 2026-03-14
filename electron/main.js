@@ -1,6 +1,7 @@
 import { app, BrowserWindow, ipcMain, dialog, Menu, shell } from 'electron'
 import path from 'path'
 import fs from 'fs'
+import { execFile } from 'child_process'
 import { createPtyManager } from './ptyManager.js'
 import { createJsonlWatcher } from './jsonlWatcher.js'
 import { worktreeCreate, worktreeRemove, worktreeIsDirty } from './worktreeManager.js'
@@ -17,6 +18,7 @@ const testSessionsArg = process.argv.find((a) => a.startsWith('--test-sessions='
 const testSessionCount = testSessionsArg ? parseInt(testSessionsArg.split('=')[1], 10) || 0 : 0
 
 let mainWindow = null
+let memoryMonitorInterval = null
 
 function getWindow() {
   return mainWindow
@@ -150,6 +152,74 @@ ipcMain.handle('session:spawn', (_, sessionId, opts) => {
   return { sessionId, cwd }
 })
 
+// ─── Memory monitor ───────────────────────────────────────────────
+
+function startMemoryMonitor() {
+  if (memoryMonitorInterval) return
+  sendMetrics()
+  memoryMonitorInterval = setInterval(sendMetrics, 2000)
+}
+
+function stopMemoryMonitor() {
+  if (!memoryMonitorInterval) return
+  clearInterval(memoryMonitorInterval)
+  memoryMonitorInterval = null
+}
+
+function sendMetrics() {
+  const win = mainWindow || BrowserWindow.getAllWindows()[0]
+  if (!win || win.isDestroyed()) return
+
+  const metrics = app.getAppMetrics()
+  const electronKB = metrics.reduce((sum, m) => sum + m.memory.workingSetSize, 0)
+  const mainKB = metrics.find(m => m.type === 'Browser')?.memory.workingSetSize || 0
+  const rendererKB = metrics.filter(m => m.type === 'Tab' || m.type === 'Renderer').reduce((sum, m) => sum + m.memory.workingSetSize, 0)
+
+  // Get PTY shell PIDs and walk their descendant trees for claude process memory
+  const ptyPids = ptyManager.getPids()
+  if (ptyPids.length === 0) {
+    win.webContents.send('debug:memory', { totalKB: electronKB, electronKB, mainKB, rendererKB, agentsKB: 0 })
+    return
+  }
+
+  // ps -eo pid,ppid,rss lists RSS (in KB) for all processes; filter to descendants of PTY pids
+  execFile('ps', ['-eo', 'pid,ppid,rss'], (err, stdout) => {
+    if (err) {
+      win.webContents.send('debug:memory', { totalKB: electronKB, electronKB, mainKB, rendererKB, agentsKB: 0 })
+      return
+    }
+
+    const procs = new Map()
+    for (const line of stdout.trim().split('\n').slice(1)) {
+      const parts = line.trim().split(/\s+/)
+      if (parts.length >= 3) {
+        procs.set(parseInt(parts[0]), { ppid: parseInt(parts[1]), rss: parseInt(parts[2]) || 0 })
+      }
+    }
+
+    // Collect all descendant PIDs of our PTY shell roots
+    const descendants = new Set()
+    const queue = [...ptyPids]
+    while (queue.length > 0) {
+      const pid = queue.pop()
+      descendants.add(pid)
+      for (const [childPid, info] of procs) {
+        if (info.ppid === pid && !descendants.has(childPid)) {
+          queue.push(childPid)
+        }
+      }
+    }
+
+    let agentsKB = 0
+    for (const pid of descendants) {
+      agentsKB += procs.get(pid)?.rss || 0
+    }
+
+    const totalKB = electronKB + agentsKB
+    win.webContents.send('debug:memory', { totalKB, electronKB, mainKB, rendererKB, agentsKB })
+  })
+}
+
 // ─── Menu ─────────────────────────────────────────────────────────
 
 function buildMenu() {
@@ -220,6 +290,18 @@ function buildMenu() {
           accelerator: 'CmdOrCtrl+2',
           click: () => {
             getActiveWindow()?.webContents.send('menu:view', 'agent')
+          },
+        },
+        { type: 'separator' },
+        {
+          label: 'Toggle Memory Monitor',
+          click: () => {
+            if (memoryMonitorInterval) {
+              stopMemoryMonitor()
+              getActiveWindow()?.webContents.send('debug:memory', null)
+            } else {
+              startMemoryMonitor()
+            }
           },
         },
         { type: 'separator' },

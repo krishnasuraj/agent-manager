@@ -193,6 +193,13 @@ export default function App() {
     setView('agent')
   }
 
+  const [memoryInfo, setMemoryInfo] = useState(null) // { totalKB, mainKB, rendererKB } | null
+
+  useEffect(() => {
+    const remove = window.electronAPI.onDebugMemory((data) => setMemoryInfo(data))
+    return () => remove()
+  }, [])
+
   const [closeModal, setCloseModal] = useState(null) // { sessionId, session, dirty }
 
   const handleCloseSession = async (sessionId) => {
@@ -398,6 +405,15 @@ export default function App() {
               </button>
             </div>
           </div>
+        </div>
+      )}
+
+      {memoryInfo && (
+        <div className="fixed bottom-2 right-2 z-50 bg-surface-1/90 border border-border rounded px-2.5 py-1.5 font-mono text-[11px] text-text-muted pointer-events-none">
+          RAM: {Math.round(memoryInfo.totalKB / 1024)} MB
+          <span className="text-text-muted/60 ml-1.5">
+            (electron {Math.round(memoryInfo.electronKB / 1024)} / agents {Math.round(memoryInfo.agentsKB / 1024)})
+          </span>
         </div>
       )}
 

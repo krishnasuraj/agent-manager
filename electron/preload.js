@@ -67,6 +67,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('jsonl:session-ended', handler)
     return () => ipcRenderer.removeListener('jsonl:session-ended', handler)
   },
+  // Debug
+  onDebugMemory: (cb) => {
+    const handler = (_, data) => cb(data)
+    ipcRenderer.on('debug:memory', handler)
+    return () => ipcRenderer.removeListener('debug:memory', handler)
+  },
+
   onJsonlSessionStarted: (cb) => {
     const handler = (_, sessionId) => cb(sessionId)
     ipcRenderer.on('jsonl:session-started', handler)

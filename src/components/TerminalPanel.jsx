@@ -43,6 +43,7 @@ export default function TerminalPanel({ sessionId, active }) {
         brightCyan: '#67e8f9',
         brightWhite: '#ffffff',
       },
+      scrollback: 2000,
       allowProposedApi: true,
       cursorBlink: true,
     })

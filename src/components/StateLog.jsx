@@ -45,6 +45,8 @@ const EventRow = memo(function EventRow({ entry }) {
   )
 })
 
+const MAX_EVENTS = 150
+
 export default function StateLog({ sessionId }) {
   const [currentState, setCurrentState] = useState({ state: 'idle', summary: 'Waiting...' })
   const [events, setEvents] = useState([])
@@ -66,7 +68,10 @@ export default function StateLog({ sessionId }) {
 
     const removeEventListener = window.electronAPI.onJsonlEvent((sid, entry) => {
       if (sid === sessionId) {
-        setEvents((prev) => [...prev, entry])
+        setEvents((prev) => {
+          const next = [...prev, entry]
+          return next.length > MAX_EVENTS ? next.slice(-MAX_EVENTS) : next
+        })
       }
     })
 
