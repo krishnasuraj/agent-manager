@@ -66,6 +66,8 @@ jsonlWatcher.onStateChange((sessionId, state) => {
       notificationTimers.set(sessionId, setTimeout(() => {
         notificationTimers.delete(sessionId)
         if (!settings.notificationsEnabled) return
+        const win = getWindow()
+        if (win && win.isFocused()) return
         const name = sessionNames.get(sessionId) || sessionId
         const notification = new Notification({
           title: `${name} needs input`,
