@@ -69,6 +69,9 @@ export function createPtyManager(getWindow) {
     const session = sessions.get(sessionId)
     if (!session) return
 
+    // Plain terminals have no agent patterns to detect
+    if (session.toolId === 'terminal') return
+
     // Append to rolling buffer, trim to max size
     session.outputBuffer += rawData
     if (session.outputBuffer.length > PTY_BUFFER_SIZE) {
@@ -168,11 +171,11 @@ export function createPtyManager(getWindow) {
       return
     }
 
-    const toolConfig = getToolConfig(toolId)
+    const toolConfig = toolId === 'terminal' ? null : getToolConfig(toolId)
     const env = getCleanEnv(toolConfig)
     const shell = getUserShell()
 
-    console.log(`[ptyManager:${sessionId}] spawning ${toolConfig.displayName} in ${cwd}`)
+    console.log(`[ptyManager:${sessionId}] spawning ${toolConfig?.displayName || 'terminal'} in ${cwd}`)
 
     const ptyProcess = pty.spawn(shell, ['-l'], {
       name: 'xterm-256color',

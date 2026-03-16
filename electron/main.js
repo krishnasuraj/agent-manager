@@ -4,7 +4,7 @@ import fs from 'fs'
 import { execFile } from 'child_process'
 import { createPtyManager } from './ptyManager.js'
 import { createJsonlWatcher } from './jsonlWatcher.js'
-import { worktreeCreate, worktreeRemove, worktreeIsDirty } from './worktreeManager.js'
+import { worktreeCreate, worktreeRemove, worktreeIsDirty, worktreeListFor } from './worktreeManager.js'
 import { getAllToolConfigs, getAvailableTools } from './toolConfigs.js'
 
 // Scrub env vars for all tools so child processes don't inherit nesting detection
@@ -58,6 +58,7 @@ let settings = loadSettings()
 
 const notificationTimers = new Map() // sessionId → timeout
 const sessionNames = new Map() // sessionId → display name
+const cwdPollers = new Map() // sessionId → { interval, lastCwd }
 
 jsonlWatcher.onStateChange((sessionId, state) => {
   if (state.state === 'needs-input') {
@@ -184,6 +185,10 @@ ipcMain.handle('worktree:remove', (_, workspace, branch, force) => {
   return { ok: true }
 })
 
+ipcMain.handle('worktree:list', (_, workspace) => {
+  return worktreeListFor(workspace)
+})
+
 // Available tools
 ipcMain.handle('tools:list', () => getAvailableTools())
 
@@ -207,6 +212,11 @@ ipcMain.handle('session:kill', (_, sessionId) => {
   ptyManager.kill(sessionId)
   jsonlWatcher.stopWatching(sessionId)
   sessionNames.delete(sessionId)
+  const poller = cwdPollers.get(sessionId)
+  if (poller) {
+    clearInterval(poller.interval)
+    cwdPollers.delete(sessionId)
+  }
   const timer = notificationTimers.get(sessionId)
   if (timer) {
     clearTimeout(timer)
@@ -219,6 +229,33 @@ ipcMain.handle('session:spawn', (_, sessionId, opts) => {
   const cwd = opts.cwd || process.cwd()
   const toolId = opts.toolId || 'claude'
   if (opts.name) sessionNames.set(sessionId, opts.name)
+
+  // Plain terminals: just spawn a shell, no agent auto-launch or JSONL watching
+  if (toolId === 'terminal') {
+    ptyManager.spawn(sessionId, { cwd, toolId, autoLaunch: false })
+
+    // Poll cwd every 2s and send updates to renderer
+    const poller = {
+      lastCwd: cwd,
+      interval: setInterval(() => {
+        const currentCwd = ptyManager.getCwd(sessionId)
+        if (currentCwd && currentCwd !== poller.lastCwd) {
+          poller.lastCwd = currentCwd
+          const parts = currentCwd.split(path.sep)
+          const short = parts.slice(-2).join('/')
+          getWindow()?.webContents.send('terminal:cwd', sessionId, short)
+        }
+      }, 2000),
+    }
+    cwdPollers.set(sessionId, poller)
+
+    // Send initial cwd
+    const parts = cwd.split(path.sep)
+    const short = parts.slice(-2).join('/')
+    getWindow()?.webContents.send('terminal:cwd', sessionId, short)
+
+    return { sessionId, cwd }
+  }
 
   const existingFiles = jsonlWatcher.snapshotFiles(toolId)
 
@@ -346,6 +383,13 @@ function buildMenu() {
           accelerator: 'CmdOrCtrl+N',
           click: () => {
             mainWindow?.webContents.send('menu:new-agent')
+          },
+        },
+        {
+          label: 'New Terminal',
+          accelerator: 'CmdOrCtrl+T',
+          click: () => {
+            mainWindow?.webContents.send('menu:new-terminal')
           },
         },
         { type: 'separator' },

@@ -33,11 +33,13 @@ export default function SessionList({ sessions, activeSessionId, onSelect, onClo
                   <span
                     className="text-[9px] font-mono rounded px-1 py-0.5"
                     style={{
-                      color: session.toolId === 'claude' ? '#E07A47' : '#7300ff',
-                      backgroundColor: session.toolId === 'claude' ? 'rgba(224,122,71,0.15)' : 'rgba(115,0,255,0.15)',
+                      color: session.toolId === 'claude' ? '#E07A47'
+                        : session.toolId === 'terminal' ? '#888' : '#7300ff',
+                      backgroundColor: session.toolId === 'claude' ? 'rgba(224,122,71,0.15)'
+                        : session.toolId === 'terminal' ? 'rgba(136,136,136,0.15)' : 'rgba(115,0,255,0.15)',
                     }}
                   >
-                    {session.toolId}
+                    {session.toolId === 'terminal' ? 'terminal' : session.toolId}
                   </span>
                 )}
                 {shortcutKey && (

@@ -20,6 +20,9 @@ export default function App() {
 
   const [showSettings, setShowSettings] = useState(false)
   const [settingsData, setSettingsData] = useState({ notificationsEnabled: true })
+  const [showNewTerminal, setShowNewTerminal] = useState(false)
+  const [terminalWorktrees, setTerminalWorktrees] = useState([])
+  const [terminalSelectedDir, setTerminalSelectedDir] = useState('main')
 
   const spawnAgent = useCallback(async (branch, workspace, cwd, toolId = 'claude') => {
     const id = `session-${Date.now()}`
@@ -32,6 +35,20 @@ export default function App() {
       await window.electronAPI.spawnSession(id, { cwd, toolId, name: branch })
     } catch (err) {
       console.error('Failed to spawn session:', err)
+    }
+  }, [])
+
+  const spawnTerminal = useCallback(async (name, workspace, cwd, branch = null) => {
+    const id = `session-${Date.now()}`
+    setSessions(prev => [...prev, {
+      id, name, branch, workspace, toolId: 'terminal', claudeActive: false, state: null, lastEvent: null,
+    }])
+    setActiveSessionId(id)
+    setView('agent')
+    try {
+      await window.electronAPI.spawnSession(id, { cwd, toolId: 'terminal', name })
+    } catch (err) {
+      console.error('Failed to spawn terminal:', err)
     }
   }, [])
 
@@ -97,6 +114,21 @@ export default function App() {
   // Keep workspacesRef in sync
   useEffect(() => { workspacesRef.current = workspaces }, [workspaces])
 
+  // Fetch worktrees when New Terminal modal opens
+  useEffect(() => {
+    if (!showNewTerminal) return
+    if (!selectedWorkspace && workspaces.length > 0) {
+      setSelectedWorkspace(workspaces[0].path)
+    }
+    const ws = workspaces.find(w => w.path === (selectedWorkspace || workspaces[0]?.path))
+    if (ws?.isGit) {
+      window.electronAPI.worktreeList(ws.path).then(setTerminalWorktrees).catch(() => setTerminalWorktrees([]))
+    } else {
+      setTerminalWorktrees([])
+    }
+    setTerminalSelectedDir('main')
+  }, [showNewTerminal])
+
   // Load settings on mount
   useEffect(() => {
     window.electronAPI.getSettings().then(setSettingsData)
@@ -128,13 +160,18 @@ export default function App() {
         setShowNewAgent(true)
       }
     })
+    const removeNewTerminal = window.electronAPI.onMenuNewTerminal(() => {
+      if (workspacesRef.current.length > 0) {
+        setShowNewTerminal(true)
+      }
+    })
     const removeView = window.electronAPI.onMenuView((v) => setView(v))
     const removeSettings = window.electronAPI.onMenuSettings(() => setShowSettings(true))
     const removeNotifSelect = window.electronAPI.onNotificationSelectAgent((sessionId) => {
       setActiveSessionId(sessionId)
       setView('agent')
     })
-    return () => { removeNewAgent(); removeView(); removeSettings(); removeNotifSelect() }
+    return () => { removeNewAgent(); removeNewTerminal(); removeView(); removeSettings(); removeNotifSelect() }
   }, [])
 
   // Global IPC listeners
@@ -151,11 +188,15 @@ export default function App() {
     const removeEvent = window.electronAPI.onJsonlEvent((id, entry) => {
       setSessions(prev => prev.map(s => s.id === id ? { ...s, lastEvent: entry.label } : s))
     })
+    const removeCwd = window.electronAPI.onTerminalCwd((id, cwd) => {
+      setSessions(prev => prev.map(s => s.id === id ? { ...s, name: cwd } : s))
+    })
     return () => {
       removeStarted()
       removeEnded()
       removeState()
       removeEvent()
+      removeCwd()
     }
   }, [])
 
@@ -175,6 +216,62 @@ export default function App() {
       setSelectedWorkspace(workspaces[0].path)
     }
     setShowNewAgent(true)
+  }
+
+  const openNewTerminalModal = async () => {
+    if (workspaces.length === 0) return
+    if (!selectedWorkspace && workspaces.length > 0) {
+      setSelectedWorkspace(workspaces[0].path)
+    }
+    const ws = workspaces.find(w => w.path === (selectedWorkspace || workspaces[0]?.path))
+    if (ws?.isGit) {
+      try {
+        const wts = await window.electronAPI.worktreeList(ws.path)
+        setTerminalWorktrees(wts)
+      } catch {
+        setTerminalWorktrees([])
+      }
+    } else {
+      setTerminalWorktrees([])
+    }
+    setTerminalSelectedDir('main')
+    setShowNewTerminal(true)
+  }
+
+  const handleTerminalWorkspaceChange = async (wsPath) => {
+    setSelectedWorkspace(wsPath)
+    const ws = workspaces.find(w => w.path === wsPath)
+    if (ws?.isGit) {
+      try {
+        const wts = await window.electronAPI.worktreeList(wsPath)
+        setTerminalWorktrees(wts)
+      } catch {
+        setTerminalWorktrees([])
+      }
+    } else {
+      setTerminalWorktrees([])
+    }
+    setTerminalSelectedDir('main')
+  }
+
+  const handleNewTerminal = async () => {
+    if (!selectedWorkspace) return
+    setShowNewTerminal(false)
+
+    let cwd = selectedWorkspace
+    let name = workspaces.find(w => w.path === selectedWorkspace)?.name || 'terminal'
+
+    let branch = null
+    if (terminalSelectedDir !== 'main') {
+      const wt = terminalWorktrees.find(w => w.branch === terminalSelectedDir)
+      if (wt) {
+        cwd = wt.path
+        name = wt.branch
+        branch = wt.branch
+      }
+    }
+
+    await spawnTerminal(name, selectedWorkspace, cwd, branch)
   }
 
   const selectedWs = workspaces.find(w => w.path === selectedWorkspace)
@@ -244,6 +341,13 @@ export default function App() {
     const session = sessions.find(s => s.id === sessionId)
     if (!session) return
 
+    // Terminal sessions — simple confirm
+    if (session.toolId === 'terminal') {
+      if (!confirm('Close this terminal?')) return
+      await doEndSession(sessionId)
+      return
+    }
+
     if (session.branch && session.workspace) {
       let dirty = false
       try {
@@ -296,7 +400,9 @@ export default function App() {
             key={session.id}
             className={`absolute inset-0 ${session.id === activeSessionId ? 'flex flex-col' : 'hidden'}`}
           >
-            <StateLog sessionId={session.claudeActive ? session.id : null} />
+            {session.toolId !== 'terminal' && (
+              <StateLog sessionId={session.claudeActive ? session.id : null} />
+            )}
           </div>
         ))}
         {sessions.length === 0 && (
@@ -350,12 +456,18 @@ export default function App() {
           )}
         </div>
         {hasWorkspaces && (
-          <div style={{ WebkitAppRegion: 'no-drag' }}>
+          <div className="flex items-center gap-1" style={{ WebkitAppRegion: 'no-drag' }}>
             <button
               onClick={openNewAgentModal}
               className="text-xs text-text-muted hover:text-text-primary border border-border hover:border-border-bright rounded px-2 py-1 transition-colors"
             >
               + New Agent <span className="text-text-muted ml-1 opacity-60">⌘N</span>
+            </button>
+            <button
+              onClick={openNewTerminalModal}
+              className="text-xs text-text-muted hover:text-text-primary border border-border hover:border-border-bright rounded px-2 py-1 transition-colors"
+            >
+              + New Terminal <span className="text-text-muted ml-1 opacity-60">⌘T</span>
             </button>
           </div>
         )}
@@ -585,6 +697,63 @@ export default function App() {
                   className="text-xs bg-status-running text-white rounded px-3 py-1.5 hover:opacity-90 transition-opacity disabled:opacity-40"
                 >
                   Create
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+      {showNewTerminal && (
+        <div
+          className="fixed inset-0 bg-black/60 flex items-center justify-center z-50"
+          onClick={() => setShowNewTerminal(false)}
+        >
+          <div
+            className="bg-surface-1 border border-border rounded-lg p-6 w-80 shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h2 className="text-sm font-semibold text-text-primary mb-4">New Terminal</h2>
+            <form onSubmit={(e) => { e.preventDefault(); handleNewTerminal() }}>
+              <label className="text-xs text-text-secondary block mb-1.5">Directory</label>
+              <select
+                value={selectedWorkspace || ''}
+                onChange={(e) => handleTerminalWorkspaceChange(e.target.value)}
+                className="w-full text-xs font-mono bg-surface-0 text-text-primary border border-border rounded px-3 py-2 outline-none focus:border-status-running mb-4"
+              >
+                {workspaces.map(ws => (
+                  <option key={ws.path} value={ws.path}>{ws.name}</option>
+                ))}
+              </select>
+              {selectedWs?.isGit && (
+                <>
+                  <label className="text-xs text-text-secondary block mb-1.5">Worktree</label>
+                  <select
+                    autoFocus
+                    value={terminalSelectedDir}
+                    onChange={(e) => setTerminalSelectedDir(e.target.value)}
+                    className="w-full text-xs font-mono bg-surface-0 text-text-primary border border-border rounded px-3 py-2 outline-none focus:border-status-running mb-4"
+                  >
+                    <option value="main">main</option>
+                    {terminalWorktrees.map(wt => (
+                      <option key={wt.branch} value={wt.branch}>{wt.branch}</option>
+                    ))}
+                  </select>
+                </>
+              )}
+              <div className="flex justify-end gap-2 mt-1">
+                <button
+                  type="button"
+                  onClick={() => setShowNewTerminal(false)}
+                  className="text-xs text-text-muted hover:text-text-primary px-3 py-1.5 transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={!selectedWorkspace}
+                  className="text-xs bg-status-running text-white rounded px-3 py-1.5 hover:opacity-90 transition-opacity disabled:opacity-40"
+                >
+                  Open
                 </button>
               </div>
             </form>

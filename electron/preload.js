@@ -39,6 +39,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('menu:view', handler)
     return () => ipcRenderer.removeListener('menu:view', handler)
   },
+  onMenuNewTerminal: (cb) => {
+    const handler = () => cb()
+    ipcRenderer.on('menu:new-terminal', handler)
+    return () => ipcRenderer.removeListener('menu:new-terminal', handler)
+  },
   onMenuSettings: (cb) => {
     const handler = () => cb()
     ipcRenderer.on('menu:settings', handler)
@@ -58,6 +63,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   worktreeCreate: (workspace, branch) => ipcRenderer.invoke('worktree:create', workspace, branch),
   worktreeIsDirty: (workspace, branch) => ipcRenderer.invoke('worktree:isDirty', workspace, branch),
   worktreeRemove: (workspace, branch, force) => ipcRenderer.invoke('worktree:remove', workspace, branch, force),
+  worktreeList: (workspace) => ipcRenderer.invoke('worktree:list', workspace),
 
   // Tools
   getAvailableTools: () => ipcRenderer.invoke('tools:list'),
@@ -84,6 +90,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('jsonl:session-ended', handler)
     return () => ipcRenderer.removeListener('jsonl:session-ended', handler)
   },
+  // Terminal cwd tracking
+  onTerminalCwd: (cb) => {
+    const handler = (_, sessionId, cwd) => cb(sessionId, cwd)
+    ipcRenderer.on('terminal:cwd', handler)
+    return () => ipcRenderer.removeListener('terminal:cwd', handler)
+  },
+
   // Debug
   onDebugMemory: (cb) => {
     const handler = (_, data) => cb(data)
