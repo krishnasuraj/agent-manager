@@ -707,6 +707,7 @@ export default function App() {
         <div
           className="fixed inset-0 bg-black/60 flex items-center justify-center z-50"
           onClick={() => setShowNewTerminal(false)}
+          onKeyDown={(e) => e.key === 'Escape' && setShowNewTerminal(false)}
         >
           <div
             className="bg-surface-1 border border-border rounded-lg p-6 w-80 shadow-xl"
