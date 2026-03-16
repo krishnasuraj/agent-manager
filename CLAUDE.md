@@ -325,7 +325,20 @@ Dark mode only. Developer tool aesthetic — Linear meets a terminal. Precise, n
 - **Stage 4:** Orchestration — kanban board (Idle/Working/Needs Input), Board/Agent view toggle, multi-workspace support, native Electron menu (Cmd+N, Cmd+Shift+O)
 - **Stage 4.5:** Distribution — electron-builder (separate arm64/x64 DMGs), auto-updater via GitHub Releases, ad-hoc code signing
 
-Deferred: desktop notifications, cross-session file conflict detection, CI integration.
+Deferred: desktop notifications, cross-session file conflict detection.
+
+---
+
+### Stage 4.6: CI Release Pipeline (GitHub Actions)
+
+**Goal:** Automate `npm run dist` + GitHub Release creation so releases don't require 10+ minutes of local waiting for signing/notarization.
+
+- **Trigger:** Push a version tag (`v*`) to kick off the workflow.
+- **macOS runner:** `macos-latest` with Xcode codesigning. Store Apple Developer ID certificate, password, Apple ID, app-specific password, and team ID as GitHub Actions secrets.
+- **Steps:** Install deps → rebuild node-pty → electron-builder `--mac` → upload DMGs, zips, `latest-mac.yml` as GitHub Release artifacts.
+- **Signing in CI:** Import the `.p12` certificate into a temporary keychain on the runner. Export `CSC_LINK` (base64 cert) and `CSC_KEY_PASSWORD` as secrets. electron-builder picks these up automatically.
+- **Notarization in CI:** Set `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`, `APPLE_TEAM_ID` as secrets. The existing `afterSign` hook (`electron/notarize.js`) handles the rest.
+- **Homebrew tap update:** Optionally add a step to compute SHA256 hashes and open a PR against `krishnasuraj/homebrew-tap`.
 
 ---
 
