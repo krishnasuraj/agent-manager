@@ -366,9 +366,9 @@ const codex = {
 
   // State derivation from Codex JSONL events.
   // Unlike Claude, Codex has explicit turn lifecycle events (task_started,
-  // task_complete), so we derive state directly from the last event type
-  // without relying on stale timers. The only exception: function_call with
-  // no function_call_output after 3s indicates an approval prompt.
+  // task_complete), so we derive state directly from the last event type.
+  // Approval prompts are detected from pending escalated tool calls
+  // (sandbox_permissions=require_escalated), not from generic stale timing.
   deriveState(events, lastWriteTime) {
     if (events.length === 0) return { state: 'idle', summary: 'Waiting...' }
 
@@ -417,10 +417,15 @@ const codex = {
       const pt = last.payload?.type
       if (pt === 'function_call' || pt === 'custom_tool_call') {
         const name = last.payload?.name || 'tool'
-        // Approval prompt detection via stale timer (PTY patterns don't work
-        // for Ratatui). 3s is enough — Codex writes function_call_output
-        // immediately after execution, so a gap means user is being prompted.
-        if (timeSinceWrite > 3000) {
+        // Long-running tools can legitimately take many seconds before writing
+        // function_call_output. Only treat stale calls as needs-input when the
+        // call itself requested escalation and is still pending.
+        let args = null
+        try {
+          args = JSON.parse(last.payload?.arguments || '{}')
+        } catch { /* */ }
+        const isEscalated = args?.sandbox_permissions === 'require_escalated'
+        if (isEscalated && timeSinceWrite > 3000) {
           return { state: 'needs-input', summary: `Waiting for approval: ${name}` }
         }
         return { state: 'working', summary: `Running: ${name}` }
