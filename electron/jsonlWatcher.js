@@ -110,7 +110,7 @@ export function createJsonlWatcher(getWindow) {
     clearTimeout(state.staleTimer)
     state.staleTimer = setTimeout(() => {
       readNewLines(sessionId, state)
-      const derived = tc.deriveState(state.events, state.lastWriteTime)
+      const derived = tc.deriveState(state.events, state.lastWriteTime, state.lastThinkingTime)
       emitState(sessionId, derived)
     }, 5000)
   }
@@ -179,6 +179,7 @@ export function createJsonlWatcher(getWindow) {
       filePath: null,
       lastWriteTime: Date.now(),
       staleTimer: null,
+      lastThinkingTime: 0,
       locked: false,
       knownFiles: existingFiles || new Map(),
       cwd: cwd || process.cwd(),
@@ -246,7 +247,7 @@ export function createJsonlWatcher(getWindow) {
           }
         }
 
-        const derived = tc.deriveState(state.events, state.lastWriteTime)
+        const derived = tc.deriveState(state.events, state.lastWriteTime, state.lastThinkingTime)
         emitState(sessionId, derived)
       }
     })
@@ -291,10 +292,12 @@ export function createJsonlWatcher(getWindow) {
     const state = sessionStates.get(sessionId)
     if (!state) return
 
+    state.lastThinkingTime = Date.now()
+
     clearTimeout(state.staleTimer)
     state.staleTimer = setTimeout(() => {
       const tc = getToolConfig(state.toolId)
-      const derived = tc.deriveState(state.events, state.lastWriteTime)
+      const derived = tc.deriveState(state.events, state.lastWriteTime, state.lastThinkingTime)
       emitState(sessionId, derived)
     }, 5000)
 

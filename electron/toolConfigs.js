@@ -53,7 +53,7 @@ const claude = {
   // PTY detection patterns
   startupPatterns: [
     /╭|Claude Code/,
-    /\*\s+[A-Z][a-z]+[.…]/,  // thinking spinner also means Claude is running
+    /[*✶✻✽✳✢⏺·]\s*[A-Z][a-z]+[.…]/,  // thinking spinner also means Claude is running
   ],
   permissionPatterns: [
     /Allow\s+Deny/i,
@@ -61,12 +61,18 @@ const claude = {
     /Allow once/i,
     /Allow always/i,
     /Yes.*don['\u2019]t ask again/i,
-    /Do you want to allow Claude to/i,
+    /Do you want to (?:allow|create|delete|execute|run|open|remove)/i,
     /\d+\.\s*Yes[,\s]/,
   ],
   thinkingPatterns: [
-    /\*\s+[A-Z][a-z]+[.…]/,
+    /[*✶✻✽✳✢⏺·]\s*[A-Z][a-z]+[.…]/,
   ],
+
+  // Tools that never show permission prompts (always auto-approved).
+  // These should never trigger "needs-input" via the stale timer.
+  autoApprovedTools: new Set([
+    'Agent', 'Task', 'TaskCreate', 'TaskGet', 'TaskList', 'TaskUpdate', 'TaskStop', 'TaskOutput',
+  ]),
 
   // JSONL meaningful event types
   meaningfulTypes: new Set(['user', 'assistant', 'system', 'result']),
@@ -80,7 +86,7 @@ const claude = {
   },
 
   // State derivation from JSONL events
-  deriveState(events, lastWriteTime) {
+  deriveState(events, lastWriteTime, lastThinkingTime) {
     if (events.length === 0) return { state: 'idle', summary: 'Waiting...' }
 
     let last = null
@@ -102,6 +108,17 @@ const claude = {
       if (toolUses.length > 0) {
         const lastTool = toolUses[toolUses.length - 1]
         if (timeSinceWrite > 5000) {
+          // Auto-approved tools (Agent, Task*, etc.) never show permission
+          // prompts, so they should never trigger needs-input.
+          if (this.autoApprovedTools.has(lastTool.name)) {
+            return { state: 'working', summary: `Running: ${lastTool.name}` }
+          }
+          // If PTY detected a thinking spinner recently, Claude is actively
+          // working (not waiting for approval). Suppress the needs-input state.
+          const thinkingAge = lastThinkingTime ? (now - lastThinkingTime) : Infinity
+          if (thinkingAge < 15000) {
+            return { state: 'working', summary: 'Thinking...' }
+          }
           return { state: 'needs-input', summary: `Waiting for approval: ${lastTool.name}` }
         }
         return { state: 'working', summary: `${lastTool.name}: ${formatClaudeToolInput(lastTool)}` }
