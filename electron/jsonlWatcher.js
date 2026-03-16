@@ -292,6 +292,29 @@ export function createJsonlWatcher(getWindow) {
     const state = sessionStates.get(sessionId)
     if (!state) return
 
+    // Guard: if the JSONL events show the agent finished responding and is
+    // idle, the PTY thinking pattern is stale buffer content. Suppress it.
+    // The rolling PTY buffer retains old spinner text (e.g. "* Thinking…")
+    // which re-matches when any new PTY data arrives (cursor blink, resize).
+    if (state.events.length > 0) {
+      const tc = getToolConfig(state.toolId)
+      let lastEvent = null
+      for (let i = state.events.length - 1; i >= 0; i--) {
+        if (!tc.isNoiseEvent(state.events[i])) {
+          lastEvent = state.events[i]
+          break
+        }
+      }
+      if (lastEvent) {
+        const timeSinceWrite = Date.now() - state.lastWriteTime
+        if (lastEvent.type === 'assistant' && timeSinceWrite > 5000) {
+          const content = Array.isArray(lastEvent.message?.content) ? lastEvent.message.content : []
+          const hasToolUse = content.some((b) => b.type === 'tool_use')
+          if (!hasToolUse) return
+        }
+      }
+    }
+
     state.lastThinkingTime = Date.now()
 
     clearTimeout(state.staleTimer)
