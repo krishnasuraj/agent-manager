@@ -3,6 +3,15 @@ import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { WebLinksAddon } from '@xterm/addon-web-links'
 
+// Minimum dimensions to prevent bogus resize during layout transitions.
+// A terminal narrower than 20 cols is never useful — skip both the xterm.js
+// internal resize (fitAddon.fit) AND the PTY resize to avoid permanently
+// damaging Ratatui TUI scroll content with narrow-width re-renders.
+const MIN_COLS = 20
+const MIN_ROWS = 5
+const MIN_CONTAINER_WIDTH_PX = 100
+const MIN_CONTAINER_HEIGHT_PX = 50
+
 export default function TerminalPanel({ sessionId, active }) {
   const containerRef = useRef(null)
   const termRef = useRef(null)
@@ -16,20 +25,27 @@ export default function TerminalPanel({ sessionId, active }) {
   activeRef.current = active
 
   // Helper: fit xterm.js to container + resize PTY only on genuine size changes.
-  // "Genuine" = both old and new sizes are non-zero (actual window resize).
-  // Hidden→visible transitions (0→real) just update the ref without sending
-  // pty:resize, so full-screen TUI apps (Codex/Ratatui) don't redraw.
+  // Guards against bogus small dimensions during layout transitions (e.g.
+  // hidden→visible, Board→Agent view switch) that would cause Ratatui to
+  // permanently re-render scroll content at a narrow width.
   function fitAndResize() {
     const fitAddon = fitAddonRef.current
     const term = termRef.current
-    if (!fitAddon || !term) return
+    const container = containerRef.current
+    if (!fitAddon || !term || !container) return
+
+    // Don't fit if container has bogus dimensions (hidden or mid-transition).
+    // This prevents fitAddon.fit() from calling terminal.resize() internally
+    // with a tiny viewport, which corrupts alternate-screen (Ratatui) display.
+    if (container.clientWidth < MIN_CONTAINER_WIDTH_PX ||
+        container.clientHeight < MIN_CONTAINER_HEIGHT_PX) return
 
     try {
       fitAddon.fit()
     } catch { return }
 
     const { cols, rows } = term
-    if (cols <= 0 || rows <= 0) return
+    if (cols < MIN_COLS || rows < MIN_ROWS) return
 
     const prev = lastSizeRef.current
     if (cols === prev.cols && rows === prev.rows) return
@@ -96,10 +112,17 @@ export default function TerminalPanel({ sessionId, active }) {
       return true
     })
 
-    // Initial fit
+    // Initial fit — only if container has reasonable dimensions.
+    // Terminals created while hidden (e.g. second terminal) will get
+    // fitted when they become active via the active useEffect.
     try {
-      fitAddon.fit()
-      lastSizeRef.current = { cols: term.cols, rows: term.rows }
+      if (containerRef.current.clientWidth >= MIN_CONTAINER_WIDTH_PX &&
+          containerRef.current.clientHeight >= MIN_CONTAINER_HEIGHT_PX) {
+        fitAddon.fit()
+        if (term.cols >= MIN_COLS && term.rows >= MIN_ROWS) {
+          lastSizeRef.current = { cols: term.cols, rows: term.rows }
+        }
+      }
     } catch { /* */ }
 
     // Terminal input → PTY (always uses current sessionId)
@@ -109,8 +132,11 @@ export default function TerminalPanel({ sessionId, active }) {
       }
     })
 
-    // Resize observer — skip when hidden to avoid bogus 0-size resizes
+    // Resize observer — skip when hidden/inactive to avoid bogus resizes.
+    // Non-active terminals get fitted when they become active (via the
+    // active useEffect below), so skipping here is safe.
     const observer = new ResizeObserver(() => {
+      if (!activeRef.current) return
       fitAndResize()
     })
     observer.observe(containerRef.current)
