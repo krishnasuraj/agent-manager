@@ -73,6 +73,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   killSession: (sessionId) => ipcRenderer.invoke('session:kill', sessionId),
   getSessionCwd: (sessionId) => ipcRenderer.invoke('session:getCwd', sessionId),
   pickFolder: () => ipcRenderer.invoke('dialog:pick-folder'),
+  openExternal: (url) => ipcRenderer.invoke('shell:openExternal', url),
 
   // JSONL state
   onJsonlEvent: (cb) => {

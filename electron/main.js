@@ -122,6 +122,15 @@ function getActiveWindow() {
   return mainWindow || BrowserWindow.getAllWindows()[0]
 }
 
+function isAllowedExternalProtocol(urlString) {
+  try {
+    const { protocol } = new URL(urlString)
+    return protocol === 'http:' || protocol === 'https:' || protocol === 'mailto:'
+  } catch {
+    return false
+  }
+}
+
 async function pickDirectory() {
   const win = getActiveWindow()
   if (!win) return null
@@ -202,6 +211,13 @@ ipcMain.handle('settings:set', (_, newSettings) => {
 
 // Folder picker
 ipcMain.handle('dialog:pick-folder', () => pickDirectory())
+
+ipcMain.handle('shell:openExternal', async (_, rawUrl) => {
+  const url = typeof rawUrl === 'string' ? rawUrl.trim() : ''
+  if (!url || !isAllowedExternalProtocol(url)) return { ok: false }
+  await shell.openExternal(url)
+  return { ok: true }
+})
 
 // Session lifecycle
 ipcMain.handle('session:getCwd', (_, sessionId) => {
@@ -495,6 +511,22 @@ function createWindow() {
   } else {
     mainWindow.loadFile(path.join(__dirname, '../renderer/index.html'))
   }
+
+  // Open links in the OS default browser instead of creating in-app windows.
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (isAllowedExternalProtocol(url)) {
+      shell.openExternal(url)
+    }
+    return { action: 'deny' }
+  })
+
+  mainWindow.webContents.on('will-navigate', (event, url) => {
+    if (url === mainWindow.webContents.getURL()) return
+    if (isAllowedExternalProtocol(url)) {
+      event.preventDefault()
+      shell.openExternal(url)
+    }
+  })
 
   mainWindow.on('closed', () => {
     mainWindow = null

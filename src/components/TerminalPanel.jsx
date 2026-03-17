@@ -80,7 +80,10 @@ export default function TerminalPanel({ sessionId, active }) {
     })
 
     const fitAddon = new FitAddon()
-    const webLinksAddon = new WebLinksAddon()
+    const webLinksAddon = new WebLinksAddon((event, url) => {
+      event?.preventDefault?.()
+      window.electronAPI.openExternal(url)
+    })
     term.loadAddon(fitAddon)
     term.loadAddon(webLinksAddon)
     term.open(containerRef.current)
