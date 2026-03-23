@@ -1,6 +1,7 @@
 # Agent Navigator 
 <img width="128" height="128" alt="helm" src="https://github.com/user-attachments/assets/7da47a7e-e560-4936-8699-4a2ac38e1796" />
- 
+
+_Read more about Agent Navigator [here](https://krishnasuraj.substack.com/p/agent-navigator-coordinate-cli-coding-agents)._
 
 A desktop app for running multiple CLI coding agents in parallel. Each agent gets its own interactive terminal and isolated git worktree. A kanban board tracks what every agent is doing so you know which ones need your attention.
 
